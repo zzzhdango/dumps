@@ -1,4 +1,5 @@
 from analysis_report import format_analysis
+from config import Config
 from strategy import CriterionResult, SignalLevels, StrategyEvaluation
 
 
@@ -9,10 +10,15 @@ def metrics() -> dict[str, float]:
         "change_4h_pct": 24.0,
         "change_24h_pct": 35.0,
         "rsi_15m": 78.2,
+        "rsi_1h": 72.4,
         "quote_volume_24h": 5_000_000.0,
         "peak": 106.0,
         "peak_distance_pct": 5.66,
         "retracement_pct": 5.66,
+        "price_5pct_from_peak": 100.7,
+        "pump_start_hours_ago": 4.9,
+        "peak_hours_ago": 1.1,
+        "current_volume_ratio": 0.15,
         "max_volume_ratio": 1.8,
         "recent_volume_ratio": 0.9,
     }
@@ -37,14 +43,15 @@ def test_formats_positive_manual_analysis():
         "BTC/USDT:USDT", True, 1_000, criteria(), metrics(), levels, ("памп",),
     )
 
-    text = format_analysis(evaluation, "15m")
+    text = format_analysis(evaluation, Config())
 
-    assert "АНАЛИЗ BTC/USDT:USDT" in text
-    assert "RSI (15m): 78.2" in text
-    assert "[ДА] Ценовой импульс" in text
-    assert "Итог: SHORT-СИГНАЛ НАЙДЕН" in text
-    assert "TP1: 94.5" in text
-    assert "SL: 111.25" in text
+    assert "🔎 Анализ BTC ⚡ [FUTURES]" in text
+    assert "📈 RSI:" in text
+    assert "15m: 78.2  |  1h: 72.4" in text
+    assert "• Памп окна: ✅" in text
+    assert "🚀 Итог: ✅ Бот бы дал сигнал" in text
+    assert "🟢 TP1: 94.5" in text
+    assert "🛑 SL: 111.25" in text
 
 
 def test_formats_negative_manual_analysis_with_failed_reasons():
@@ -52,9 +59,9 @@ def test_formats_negative_manual_analysis_with_failed_reasons():
         "BTC/USDT:USDT", False, 1_000, criteria(False), metrics(), None, (),
     )
 
-    text = format_analysis(evaluation, "15m")
+    text = format_analysis(evaluation, Config())
 
-    assert "[НЕТ] Ценовой импульс" in text
-    assert "Итог: SHORT-СИГНАЛА НЕТ" in text
-    assert "Не выполнено: Ценовой импульс." in text
+    assert "• Памп окна: ❌" in text
+    assert "🚫 Итог: ❌ Сигнала бы не было" in text
+    assert "• Ни одно окно пампа не достигло заданного порога." in text
     assert "TP1:" not in text

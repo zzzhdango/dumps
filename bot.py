@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from aiogram import Bot, Dispatcher, Router
+from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
@@ -49,6 +49,7 @@ def build_dispatcher(
     async def start(message: Message) -> None:
         await message.answer(
             "BingX Short Bot запущен.\n\n"
+            "Просто отправьте тикер монеты, например: FLOCK\n\n"
             "Команды:\n"
             "/analyze BTC — полный анализ выбранной монеты\n"
             "/scan BTC — короткий псевдоним команды /analyze\n"
@@ -61,9 +62,12 @@ def build_dispatcher(
     async def help_command(message: Message) -> None:
         await message.answer(
             "Для ручного анализа отправьте:\n"
+            "BTC\n"
+            "BTCUSDT\n"
+            "BTC/USDT:USDT\n\n"
+            "Также доступны команды:\n"
             "/analyze BTC\n"
-            "/analyze BTCUSDT\n"
-            "/analyze BTC/USDT:USDT\n\n"
+            "/scan BTC\n\n"
             "Бот проверит активный USDT-M фьючерс BingX по тем же критериям, "
             "что используются автоматическим сканером. API-ключ BingX не нужен."
         )
@@ -88,13 +92,7 @@ def build_dispatcher(
             f"RSI: {cfg.min_rsi_15m}\nМин. оборот: {cfg.min_quote_volume_24h:,.0f} USDT\nПлечо: {cfg.leverage}x\nРиск: {cfg.risk_pct}%"
         )
 
-    @router.message(Command("analyze", "scan"))
-    async def analyze(message: Message) -> None:
-        parts = (message.text or "").split(maxsplit=1)
-        if len(parts) < 2 or not parts[1].strip():
-            await message.answer("Укажите монету. Пример: /analyze BTC")
-            return
-        query = parts[1].strip()
+    async def run_analysis(message: Message, query: str) -> None:
         symbol = client.resolve_symbol(query)
         if symbol is None:
             try:
@@ -106,10 +104,9 @@ def build_dispatcher(
         if symbol is None:
             await message.answer(
                 f"Активный USDT-M фьючерс «{query.upper()}» не найден на BingX. "
-                "Проверьте тикер, например: /analyze BTC"
+                "Проверьте тикер, например: BTC"
             )
             return
-        await message.answer(f"Анализирую {symbol} по закрытым свечам BingX…")
         try:
             candles, quote_volume = await client.fetch_market(symbol)
             required_bars = 24 * 60 // cfg.timeframe_minutes + 24
@@ -120,7 +117,7 @@ def build_dispatcher(
                 )
                 return
             evaluation = evaluate_strategy(symbol, candles, quote_volume, cfg)
-            await message.answer(format_analysis(evaluation, cfg.timeframe))
+            await message.answer(format_analysis(evaluation, cfg))
         except MarketUnavailable:
             await message.answer(f"{symbol} сейчас находится в состоянии paused на BingX. Попробуйте позже.")
         except Exception:
@@ -128,6 +125,21 @@ def build_dispatcher(
             await message.answer(
                 f"Не удалось проанализировать {symbol} из-за временной ошибки BingX. Попробуйте позже."
             )
+
+    @router.message(Command("analyze", "scan"))
+    async def analyze(message: Message) -> None:
+        parts = (message.text or "").split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            await message.answer("Укажите монету. Пример: /analyze BTC")
+            return
+        await run_analysis(message, parts[1].strip())
+
+    @router.message(F.text)
+    async def analyze_plain_ticker(message: Message) -> None:
+        query = (message.text or "").strip()
+        if query.startswith("/"):
+            return
+        await run_analysis(message, query)
 
     dispatcher = Dispatcher()
     dispatcher.include_router(router)

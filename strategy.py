@@ -73,14 +73,36 @@ def evaluate_strategy(symbol: str, candles: pd.DataFrame, quote_volume_24h: floa
             changes["change_24h_pct"] >= cfg.pump_24h_pct)
     super_pump = max(changes.values()) >= cfg.super_pump_pct
     rsi = float(RSIIndicator(df.close, window=14).rsi().iloc[-1])
-    peak = float(df.high.iloc[-bars_24h:].max())
+    recent_24h = df.iloc[-bars_24h:]
+    peak_index = int(recent_24h.high.idxmax())
+    peak = float(df.high.loc[peak_index])
     peak_distance = (peak - close) / peak * 100.0
     retracement = peak_distance
+    peak_hours_ago = max(
+        0.0,
+        (float(df.timestamp.iloc[-1]) - float(df.timestamp.loc[peak_index])) / 3_600_000,
+    )
+    before_peak = recent_24h.loc[:peak_index]
+    pump_start_index = int(before_peak.low.idxmin())
+    pump_start_hours_ago = max(
+        0.0,
+        (float(df.timestamp.iloc[-1]) - float(df.timestamp.loc[pump_start_index])) / 3_600_000,
+    )
+
+    hour_group = (df.timestamp // 3_600_000).astype("int64")
+    hourly = df.groupby(hour_group).agg(close=("close", "last"), count=("close", "size"))
+    hourly = hourly[hourly["count"] >= bars_1h]
+    rsi_1h = (
+        float(RSIIndicator(hourly.close, window=14).rsi().iloc[-1])
+        if len(hourly) >= 15
+        else math.nan
+    )
 
     baseline = df.volume.rolling(20, min_periods=20).mean().shift(1)
     volume_ratios = df.volume / baseline
     bars_2h = 2 * bars_1h
     max_volume_ratio = float(volume_ratios.iloc[-bars_2h:].max())
+    current_volume_ratio = float(volume_ratios.iloc[-1])
     recent_volume_ratio = float(df.volume.iloc[-3:].sum() / df.volume.iloc[-6:-3].sum()) if df.volume.iloc[-6:-3].sum() > 0 else math.inf
     price_not_rising = bool(df.close.iloc[-1] <= df.close.iloc[-2])
 
@@ -95,9 +117,22 @@ def evaluate_strategy(symbol: str, candles: pd.DataFrame, quote_volume_24h: floa
         "recent_volume_cooling": CriterionResult(recent_volume_ratio <= cfg.max_recent_volume_ratio, recent_volume_ratio, f"≤{cfg.max_recent_volume_ratio}"),
     }
     passed = all(item.passed for item in criteria.values())
-    metrics = {**changes, "quote_volume_24h": float(quote_volume_24h), "rsi_15m": rsi,
-               "close": close, "peak": peak, "peak_distance_pct": peak_distance, "retracement_pct": retracement,
-               "max_volume_ratio": max_volume_ratio, "recent_volume_ratio": recent_volume_ratio}
+    metrics = {
+        **changes,
+        "quote_volume_24h": float(quote_volume_24h),
+        "rsi_15m": rsi,
+        "rsi_1h": rsi_1h,
+        "close": close,
+        "peak": peak,
+        "peak_distance_pct": peak_distance,
+        "retracement_pct": retracement,
+        "price_5pct_from_peak": peak * 0.95,
+        "pump_start_hours_ago": pump_start_hours_ago,
+        "peak_hours_ago": peak_hours_ago,
+        "current_volume_ratio": current_volume_ratio,
+        "max_volume_ratio": max_volume_ratio,
+        "recent_volume_ratio": recent_volume_ratio,
+    }
     levels = None
     reasons: tuple[str, ...] = ()
     if passed:
