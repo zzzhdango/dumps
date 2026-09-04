@@ -1,0 +1,8 @@
+.......................                                                  [100%]
+23 passed in 0.44s
+
+Smoke test with screenshot symbols:
+OK: BingX public API, 5 swap markets, MARSCOIN/USDT:USDT, candles=149, quoteVolume=9132306.5
+
+Syntax:
+compileall: OK
