@@ -61,3 +61,21 @@ def test_paused_markets_are_reset_for_next_cycle():
     previous = client.reset_paused_for_recheck()
     assert previous == {"PAUSED/USDT:USDT"}
     assert client.unavailable_symbols == set()
+
+
+@pytest.mark.parametrize("query", [
+    "btc",
+    "BTCUSDT",
+    "btc/usdt:usdt",
+    " BTC ",
+])
+def test_resolves_manual_symbol_formats(query):
+    client = object.__new__(BingXPublicClient)
+    client.available_symbols = {"BTC/USDT:USDT", "ETH/USDT:USDT"}
+    assert client.resolve_symbol(query) == "BTC/USDT:USDT"
+
+
+def test_rejects_unknown_manual_symbol():
+    client = object.__new__(BingXPublicClient)
+    client.available_symbols = {"BTC/USDT:USDT"}
+    assert client.resolve_symbol("UNKNOWN") is None

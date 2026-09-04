@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 from aiohttp import web
 from aiogram import Bot
+from aiogram.types import BotCommand
 from dotenv import load_dotenv
 
 from bot import build_dispatcher, format_signal
@@ -115,7 +116,15 @@ async def run() -> None:
         await runner.setup()
         await web.TCPSite(runner, cfg.health_host, cfg.health_port).start()
         scanner = asyncio.create_task(scan_forever(cfg, client, store, bot, runtime))
-        dispatcher = build_dispatcher(cfg, store, runtime)
+        await bot.set_my_commands([
+            BotCommand(command="analyze", description="Анализ выбранной монеты"),
+            BotCommand(command="scan", description="Короткая команда анализа"),
+            BotCommand(command="status", description="Состояние сканера"),
+            BotCommand(command="settings", description="Настройки стратегии"),
+            BotCommand(command="help", description="Справка"),
+            BotCommand(command="start", description="Запуск бота"),
+        ])
+        dispatcher = build_dispatcher(cfg, store, runtime, client)
         await dispatcher.start_polling(bot)
     finally:
         if scanner:

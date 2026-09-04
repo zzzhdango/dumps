@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import logging
+
 from aiogram import Bot, Dispatcher, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
+from analysis_report import format_analysis
 from config import Config
+from exchange import BingXPublicClient, MarketUnavailable
 from signals import SignalStore
-from strategy import StrategyEvaluation
+from strategy import StrategyEvaluation, evaluate_strategy
+
+log = logging.getLogger(__name__)
 
 
 def format_signal(ev: StrategyEvaluation) -> str:
@@ -31,12 +37,36 @@ def format_signal(ev: StrategyEvaluation) -> str:
     return "\n".join(lines)
 
 
-def build_dispatcher(cfg: Config, store: SignalStore, runtime: dict) -> Dispatcher:
+def build_dispatcher(
+    cfg: Config,
+    store: SignalStore,
+    runtime: dict,
+    client: BingXPublicClient,
+) -> Dispatcher:
     router = Router()
 
     @router.message(Command("start"))
     async def start(message: Message) -> None:
-        await message.answer("BingX Short Bot запущен. Команды: /status, /settings")
+        await message.answer(
+            "BingX Short Bot запущен.\n\n"
+            "Команды:\n"
+            "/analyze BTC — полный анализ выбранной монеты\n"
+            "/scan BTC — короткий псевдоним команды /analyze\n"
+            "/status — состояние сканера\n"
+            "/settings — настройки стратегии\n"
+            "/help — справка"
+        )
+
+    @router.message(Command("help"))
+    async def help_command(message: Message) -> None:
+        await message.answer(
+            "Для ручного анализа отправьте:\n"
+            "/analyze BTC\n"
+            "/analyze BTCUSDT\n"
+            "/analyze BTC/USDT:USDT\n\n"
+            "Бот проверит активный USDT-M фьючерс BingX по тем же критериям, "
+            "что используются автоматическим сканером. API-ключ BingX не нужен."
+        )
 
     @router.message(Command("status"))
     async def status(message: Message) -> None:
@@ -57,6 +87,47 @@ def build_dispatcher(cfg: Config, store: SignalStore, runtime: dict) -> Dispatch
             f"Интервал: {cfg.scanner_interval} сек\nТаймфрейм: {cfg.timeframe}\nПамп: 1h {cfg.pump_1h_pct}% / 4h {cfg.pump_4h_pct}% / 24h {cfg.pump_24h_pct}%\n"
             f"RSI: {cfg.min_rsi_15m}\nМин. оборот: {cfg.min_quote_volume_24h:,.0f} USDT\nПлечо: {cfg.leverage}x\nРиск: {cfg.risk_pct}%"
         )
+
+    @router.message(Command("analyze", "scan"))
+    async def analyze(message: Message) -> None:
+        parts = (message.text or "").split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            await message.answer("Укажите монету. Пример: /analyze BTC")
+            return
+        query = parts[1].strip()
+        symbol = client.resolve_symbol(query)
+        if symbol is None:
+            try:
+                await client.refresh_markets()
+                runtime["market_count"] = len(client.symbols)
+                symbol = client.resolve_symbol(query)
+            except Exception:
+                log.exception("Не удалось обновить каталог BingX для ручного анализа")
+        if symbol is None:
+            await message.answer(
+                f"Активный USDT-M фьючерс «{query.upper()}» не найден на BingX. "
+                "Проверьте тикер, например: /analyze BTC"
+            )
+            return
+        await message.answer(f"Анализирую {symbol} по закрытым свечам BingX…")
+        try:
+            candles, quote_volume = await client.fetch_market(symbol)
+            required_bars = 24 * 60 // cfg.timeframe_minutes + 24
+            if len(candles) < required_bars:
+                await message.answer(
+                    f"Для {symbol} пока недостаточно истории: "
+                    f"{len(candles)} из {required_bars} закрытых свечей."
+                )
+                return
+            evaluation = evaluate_strategy(symbol, candles, quote_volume, cfg)
+            await message.answer(format_analysis(evaluation, cfg.timeframe))
+        except MarketUnavailable:
+            await message.answer(f"{symbol} сейчас находится в состоянии paused на BingX. Попробуйте позже.")
+        except Exception:
+            log.exception("Ошибка ручного анализа %s", symbol)
+            await message.answer(
+                f"Не удалось проанализировать {symbol} из-за временной ошибки BingX. Попробуйте позже."
+            )
 
     dispatcher = Dispatcher()
     dispatcher.include_router(router)

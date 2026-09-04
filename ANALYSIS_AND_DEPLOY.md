@@ -94,11 +94,11 @@ tests/test_signals.py
 
 ## Тесты и фактический результат
 
-Unit-тесты используют только синтетические pandas DataFrame. Есть положительный кейс всех условий, отдельные отрицательные проверки pump, quote volume, RSI/super-pump, peak distance, retracement, volume spike, price cooling и volume cooling, а также тесты уровней, position sizing, дедупликации, persistence, консервативного SL и валидации config.
+Unit-тесты используют только синтетические pandas DataFrame. Есть положительный кейс всех условий, отдельные отрицательные проверки pump, quote volume, RSI/super-pump, peak distance, retracement, volume spike, price cooling и volume cooling, а также тесты уровней, position sizing, дедупликации, persistence, консервативного SL, валидации config, распознавания ручного тикера и полного отчёта анализа.
 
 ```text
 ...................................                                      [100%]
-35 passed in 1.05s
+42 passed in 0.94s
 ```
 
 Фактический smoke-запрос из текущей среды:
@@ -142,7 +142,18 @@ Railway поддерживает `railway.json` с `startCommand` и `healthchec
 6. Сгенерируйте публичный domain для сервиса. Railway будет проверять `/health`, а один процесс одновременно держит aiohttp и Telegram long polling.
 7. Не масштабируйте сервис более чем до одной реплики. Несколько экземпляров Telegram polling будут конкурировать и могут дублировать scanner.
 8. После первого deploy откройте Railway Shell и выполните `python check_api.py`, чтобы проверить полное обнаружение рынков. Для одного быстрого контрольного запроса используйте `SYMBOLS=BTC/USDT:USDT python check_api.py`.
-9. Убедитесь, что вывод начинается с `OK: BingX public API`, затем проверьте `/health` и команды `/start`, `/status`, `/settings`.
+9. Убедитесь, что вывод начинается с `OK: BingX public API`, затем проверьте `/health` и команды `/start`, `/status`, `/settings`, `/help`, `/analyze BTC`.
+
+## Ручной анализ монеты
+
+Команда `/analyze BTC` или её короткий вариант `/scan BTC` анализирует любую
+активную USDT-M пару из полного публичного каталога BingX. Допустимые форматы:
+`BTC`, `BTCUSDT`, `BTC/USDT:USDT`.
+
+Бот показывает последнюю закрытую цену, изменения за 1h/4h/24h, RSI, оборот,
+пик и откат за 24 часа, коэффициенты объёма и результат каждого критерия.
+Если все критерии пройдены, отчёт также содержит вход, TP1, TP2, TP3, SL и
+плечо. Если сигнал отсутствует, бот явно перечисляет невыполненные условия.
 
 ### Переменные окружения
 

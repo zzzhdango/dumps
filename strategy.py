@@ -96,7 +96,7 @@ def evaluate_strategy(symbol: str, candles: pd.DataFrame, quote_volume_24h: floa
     }
     passed = all(item.passed for item in criteria.values())
     metrics = {**changes, "quote_volume_24h": float(quote_volume_24h), "rsi_15m": rsi,
-               "peak": peak, "peak_distance_pct": peak_distance, "retracement_pct": retracement,
+               "close": close, "peak": peak, "peak_distance_pct": peak_distance, "retracement_pct": retracement,
                "max_volume_ratio": max_volume_ratio, "recent_volume_ratio": recent_volume_ratio}
     levels = None
     reasons: tuple[str, ...] = ()

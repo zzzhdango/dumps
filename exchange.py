@@ -30,6 +30,7 @@ class BingXPublicClient:
         self.exchange = ccxt.bingx({"enableRateLimit": True, "timeout": cfg.request_timeout_ms,
                                     "options": {"defaultType": "swap"}})
         self.symbols: list[str] = []
+        self.available_symbols: set[str] = set()
         self.unavailable_symbols: set[str] = set()
 
     async def _retry(self, operation: Callable[[], Awaitable[T]], label: str) -> T:
@@ -50,6 +51,7 @@ class BingXPublicClient:
 
         markets = await self._retry(load, "reload_markets" if reload else "load_markets")
         available = {s for s, m in markets.items() if m.get("swap") and m.get("active", True) and m.get("quote") == "USDT"}
+        self.available_symbols = available
         if self.cfg.symbols:
             invalid = set(self.cfg.symbols) - available
             if invalid:
@@ -77,6 +79,20 @@ class BingXPublicClient:
         previous = set(self.unavailable_symbols)
         self.unavailable_symbols.clear()
         return previous
+
+    def resolve_symbol(self, raw: str) -> str | None:
+        """Resolve BTC, BTCUSDT or a unified symbol to an active BingX USDT swap."""
+        value = raw.strip().upper().replace(" ", "")
+        if not value:
+            return None
+        if value.endswith("/USDT:USDT"):
+            candidate = value
+        elif value.endswith("USDT"):
+            base = value[:-4].rstrip("/:-")
+            candidate = f"{base}/USDT:USDT"
+        else:
+            candidate = f"{value}/USDT:USDT"
+        return candidate if candidate in self.available_symbols else None
 
     async def fetch_market(self, symbol: str) -> tuple[pd.DataFrame, float]:
         async def bars() -> Any:

@@ -1,0 +1,60 @@
+from analysis_report import format_analysis
+from strategy import CriterionResult, SignalLevels, StrategyEvaluation
+
+
+def metrics() -> dict[str, float]:
+    return {
+        "close": 100.0,
+        "change_1h_pct": 12.5,
+        "change_4h_pct": 24.0,
+        "change_24h_pct": 35.0,
+        "rsi_15m": 78.2,
+        "quote_volume_24h": 5_000_000.0,
+        "peak": 106.0,
+        "peak_distance_pct": 5.66,
+        "retracement_pct": 5.66,
+        "max_volume_ratio": 1.8,
+        "recent_volume_ratio": 0.9,
+    }
+
+
+def criteria(passed: bool = True) -> dict[str, CriterionResult]:
+    return {
+        "pump": CriterionResult(passed, 35.0, "1h≥10% OR 4h≥20% OR 24h≥30%"),
+        "quote_volume": CriterionResult(True, 5_000_000.0, "≥3000000"),
+        "rsi_or_super_pump": CriterionResult(True, 78.2, "RSI(15m)≥75 OR pump≥50%"),
+        "peak_distance": CriterionResult(True, 5.66, "≤10%"),
+        "retracement": CriterionResult(True, 5.66, "≥5%"),
+        "volume_spike": CriterionResult(True, 1.8, "≥1.3"),
+        "price_not_rising": CriterionResult(True, True, "close≤previous close"),
+        "recent_volume_cooling": CriterionResult(True, 0.9, "≤1.3"),
+    }
+
+
+def test_formats_positive_manual_analysis():
+    levels = SignalLevels(100, 94.5, 90, 85, 111.25, 3, None, None, None)
+    evaluation = StrategyEvaluation(
+        "BTC/USDT:USDT", True, 1_000, criteria(), metrics(), levels, ("памп",),
+    )
+
+    text = format_analysis(evaluation, "15m")
+
+    assert "АНАЛИЗ BTC/USDT:USDT" in text
+    assert "RSI (15m): 78.2" in text
+    assert "[ДА] Ценовой импульс" in text
+    assert "Итог: SHORT-СИГНАЛ НАЙДЕН" in text
+    assert "TP1: 94.5" in text
+    assert "SL: 111.25" in text
+
+
+def test_formats_negative_manual_analysis_with_failed_reasons():
+    evaluation = StrategyEvaluation(
+        "BTC/USDT:USDT", False, 1_000, criteria(False), metrics(), None, (),
+    )
+
+    text = format_analysis(evaluation, "15m")
+
+    assert "[НЕТ] Ценовой импульс" in text
+    assert "Итог: SHORT-СИГНАЛА НЕТ" in text
+    assert "Не выполнено: Ценовой импульс." in text
+    assert "TP1:" not in text
