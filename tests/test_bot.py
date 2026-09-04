@@ -52,6 +52,9 @@ def test_formats_positive_manual_analysis():
     assert "🚀 Итог: ✅ Бот бы дал сигнал" in text
     assert "🟢 TP1: 94.5" in text
     assert "🛑 SL: 111.25" in text
+    assert "Срез" not in text
+    assert "Не финансовая рекомендация" not in text
+    assert "закрытых свечах BingX" not in text
 
 
 def test_formats_negative_manual_analysis_with_failed_reasons():

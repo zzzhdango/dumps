@@ -1,5 +1,5 @@
 ..........................................                               [100%]
-42 passed in 0.92s
+42 passed in 0.82s
 
 Smoke test with SYMBOLS=ALL:
 OK: BingX public API, 853 swap markets, 0G/USDT:USDT, candles=149, quoteVolume=6734002.31
@@ -18,3 +18,5 @@ Manual analysis smoke test:
 OK: FLOCK/USDT:USDT, candles=149, passed=False, message_chars=1012
 Track Analyze report: OK
 Plain ticker input: BTC, BTCUSDT and BTC/USDT:USDT supported
+Timestamp header removed: OK
+Bottom disclaimer removed: OK

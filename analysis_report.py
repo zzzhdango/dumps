@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import math
-from zoneinfo import ZoneInfo
 
 from config import Config
 from strategy import StrategyEvaluation
@@ -63,9 +61,6 @@ def _failed_reason(name: str, ev: StrategyEvaluation, cfg: Config) -> str:
 
 def format_analysis(ev: StrategyEvaluation, cfg: Config) -> str:
     m = ev.metrics
-    close_time = ev.candle_timestamp / 1000 + cfg.timeframe_minutes * 60
-    utc_time = datetime.fromtimestamp(close_time, tz=timezone.utc)
-    kyiv_time = utc_time.astimezone(ZoneInfo("Europe/Kyiv"))
     base = ev.symbol.split("/")[0]
 
     passed_windows = []
@@ -83,8 +78,6 @@ def format_analysis(ev: StrategyEvaluation, cfg: Config) -> str:
     criteria = ev.criteria
     lines = [
         f"🔎 Анализ {base} ⚡ [FUTURES]",
-        f"⏰ Срез (Киев): {kyiv_time:%Y-%m-%d %H:%M}",
-        f"🌍 Срез (UTC): {utc_time:%Y-%m-%d %H:%M} UTC",
         f"🪙 Цена: {m['close']:.8g}",
         "",
         "📊 Изменения:",
@@ -177,5 +170,4 @@ def format_analysis(ev: StrategyEvaluation, cfg: Config) -> str:
             if not result.passed
         )
 
-    lines += ["", "ℹ️ Анализ основан на закрытых свечах BingX.", "Не финансовая рекомендация."]
     return "\n".join(lines)
