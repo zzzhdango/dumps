@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import sys
+import time
 from datetime import datetime, timezone
 
 from aiohttp import web
@@ -11,19 +13,28 @@ from dotenv import load_dotenv
 
 from bot import build_dispatcher, format_signal
 from config import Config
-from exchange import BingXPublicClient
+from exchange import BingXPublicClient, MarketUnavailable
 from signals import SignalStore
 from strategy import evaluate_strategy
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    stream=sys.stdout,
+)
 log = logging.getLogger(__name__)
 
 
 async def scan_forever(cfg: Config, client: BingXPublicClient, store: SignalStore, bot: Bot, runtime: dict) -> None:
     while True:
+        cycle_started = time.monotonic()
+        runtime["scan_progress"] = f"0/{len(client.symbols)}"
+        log.info("Запуск цикла сканирования %d рынков", len(client.symbols))
         try:
-            for symbol in client.symbols:
+            for index, symbol in enumerate(client.symbols, start=1):
                 try:
+                    if symbol in client.unavailable_symbols:
+                        continue
                     candles, quote_volume = await client.fetch_market(symbol)
                     await store.update_from_candles(symbol, candles)
                     required_bars = 24 * 60 // cfg.timeframe_minutes + 24
@@ -34,9 +45,24 @@ async def scan_forever(cfg: Config, client: BingXPublicClient, store: SignalStor
                         await bot.send_message(cfg.telegram_chat_id, format_signal(evaluation))
                 except asyncio.CancelledError:
                     raise
+                except MarketUnavailable as exc:
+                    runtime["unavailable_count"] = len(client.unavailable_symbols)
+                    log.warning("%s; рынок исключён из следующих циклов", exc)
                 except Exception:
                     log.exception("Ошибка обработки %s; сканирование продолжено", symbol)
+                finally:
+                    runtime["scan_progress"] = f"{index}/{len(client.symbols)}"
+                    if index % 100 == 0 or index == len(client.symbols):
+                        log.info(
+                            "Прогресс сканирования: %d/%d рынков, paused: %d",
+                            index,
+                            len(client.symbols),
+                            len(client.unavailable_symbols),
+                        )
             runtime["last_scan"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            duration = time.monotonic() - cycle_started
+            runtime["last_scan_duration"] = f"{duration:.1f} сек"
+            log.info("Цикл сканирования завершён за %.1f сек", duration)
         except asyncio.CancelledError:
             raise
         except Exception:

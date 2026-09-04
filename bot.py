@@ -44,7 +44,10 @@ def build_dispatcher(cfg: Config, store: SignalStore, runtime: dict) -> Dispatch
         await message.answer(
             f"Состояние: работает\n"
             f"Рынков BingX в сканере: {runtime.get('market_count', 'инициализация')}\n"
+            f"Временно paused: {runtime.get('unavailable_count', 0)}\n"
+            f"Текущий прогресс: {runtime.get('scan_progress', 'ожидание')}\n"
             f"Последний цикл: {runtime.get('last_scan', 'ещё не завершён')}\n"
+            f"Длительность цикла: {runtime.get('last_scan_duration', 'ещё не измерена')}\n"
             f"Активные сигналы: {active}"
         )
 

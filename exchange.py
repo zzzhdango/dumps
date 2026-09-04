@@ -15,12 +15,22 @@ T = TypeVar("T")
 RETRYABLE = (ccxt.NetworkError, ccxt.RequestTimeout, ccxt.ExchangeNotAvailable, ccxt.DDoSProtection, ccxt.RateLimitExceeded)
 
 
+class MarketUnavailable(RuntimeError):
+    """BingX advertises the market, but public candles are currently paused."""
+
+
+def is_paused_market_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return '"code":109415' in text or ("is pause currently" in text and "bingx" in text)
+
+
 class BingXPublicClient:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.exchange = ccxt.bingx({"enableRateLimit": True, "timeout": cfg.request_timeout_ms,
                                     "options": {"defaultType": "swap"}})
         self.symbols: list[str] = []
+        self.unavailable_symbols: set[str] = set()
 
     async def _retry(self, operation: Callable[[], Awaitable[T]], label: str) -> T:
         for attempt in range(self.cfg.max_retries):
@@ -52,7 +62,16 @@ class BingXPublicClient:
             return await self.exchange.fetch_ohlcv(symbol, self.cfg.timeframe, limit=self.cfg.ohlcv_limit)
         async def ticker() -> Any:
             return await self.exchange.fetch_ticker(symbol)
-        raw, tick = await asyncio.gather(self._retry(bars, f"OHLCV {symbol}"), self._retry(ticker, f"ticker {symbol}"))
+        try:
+            # Candles идут первыми: если BingX объявил рынок paused, не запускаем
+            # лишний ticker request и не оставляем retry-задачу в фоне.
+            raw = await self._retry(bars, f"OHLCV {symbol}")
+            tick = await self._retry(ticker, f"ticker {symbol}")
+        except ccxt.ExchangeError as exc:
+            if is_paused_market_error(exc):
+                self.unavailable_symbols.add(symbol)
+                raise MarketUnavailable(f"{symbol}: публичные свечи BingX временно приостановлены") from exc
+            raise
         now_ms = int(time.time() * 1000)
         candle_ms = self.cfg.timeframe_minutes * 60 * 1000
         completed = [row for row in raw if int(row[0]) + candle_ms <= now_ms]

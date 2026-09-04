@@ -97,8 +97,8 @@ tests/test_signals.py
 Unit-тесты используют только синтетические pandas DataFrame. Есть положительный кейс всех условий, отдельные отрицательные проверки pump, quote volume, RSI/super-pump, peak distance, retracement, volume spike, price cooling и volume cooling, а также тесты уровней, position sizing, дедупликации, persistence, консервативного SL и валидации config.
 
 ```text
-.............................                                            [100%]
-29 passed in 0.37s
+.................................                                        [100%]
+33 passed in 0.91s
 ```
 
 Фактический smoke-запрос из текущей среды:
