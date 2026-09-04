@@ -14,6 +14,17 @@ def test_loads_env_and_unified_symbols():
     assert cfg.timeframe_minutes == 15
 
 
+@pytest.mark.parametrize("value", ["", "ALL", "all", "*", "SYMBOLS="])
+def test_full_market_aliases(value):
+    cfg = Config.from_env({"SYMBOLS": value})
+    assert cfg.symbols == ()
+
+
+def test_symbols_are_normalized_to_uppercase():
+    cfg = Config.from_env({"SYMBOLS": "btc/usdt:usdt"})
+    assert cfg.symbols == ("BTC/USDT:USDT",)
+
+
 @pytest.mark.parametrize("env", [
     {"SCANNER_INTERVAL": "9"}, {"OHLCV_LIMIT": "119"}, {"LEVERAGE": "0"},
     {"RISK_PCT": "101"}, {"ACCOUNT_SIZE": "-1"}, {"TP1_PCT": "12", "TP2_PCT": "10"},

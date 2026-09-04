@@ -41,7 +41,12 @@ def build_dispatcher(cfg: Config, store: SignalStore, runtime: dict) -> Dispatch
     @router.message(Command("status"))
     async def status(message: Message) -> None:
         active = ", ".join(sorted(store.active)) or "нет"
-        await message.answer(f"Состояние: работает\nПоследний цикл: {runtime.get('last_scan', 'ещё не завершён')}\nАктивные сигналы: {active}")
+        await message.answer(
+            f"Состояние: работает\n"
+            f"Рынков BingX в сканере: {runtime.get('market_count', 'инициализация')}\n"
+            f"Последний цикл: {runtime.get('last_scan', 'ещё не завершён')}\n"
+            f"Активные сигналы: {active}"
+        )
 
     @router.message(Command("settings"))
     async def settings(message: Message) -> None:

@@ -20,6 +20,18 @@ def _int(env: Mapping[str, str], name: str, default: int) -> int:
         raise ValueError(f"{name} должен быть целым числом") from exc
 
 
+def _symbols(env: Mapping[str, str]) -> tuple[str, ...]:
+    raw = env.get("SYMBOLS", "").strip()
+    if raw.upper() in {"", "ALL", "*"}:
+        return ()
+    # Защита от частой ошибки при вставке в Railway: значение "SYMBOLS=".
+    if raw.upper().startswith("SYMBOLS="):
+        raw = raw.split("=", 1)[1].strip()
+        if raw.upper() in {"", "ALL", "*"}:
+            return ()
+    return tuple(item.strip().upper() for item in raw.split(",") if item.strip())
+
+
 @dataclass(frozen=True, slots=True)
 class Config:
     telegram_bot_token: str = ""
@@ -58,11 +70,7 @@ class Config:
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Config":
         e = os.environ if env is None else env
-        default_symbols = (
-            "MARSCOIN/USDT:USDT,USELESS/USDT:USDT,SKR/USDT:USDT,"
-            "PONS/USDT:USDT,FLOCK/USDT:USDT"
-        )
-        symbols = tuple(x.strip() for x in e.get("SYMBOLS", default_symbols).split(",") if x.strip())
+        symbols = _symbols(e)
         cfg = cls(
             telegram_bot_token=e.get("BOT_TOKEN", e.get("TELEGRAM_BOT_TOKEN", "")).strip(),
             telegram_chat_id=e.get("TELEGRAM_CHAT_ID", "").strip(),
@@ -135,7 +143,7 @@ class Config:
         if self.account_size < 0 or self.risk_pct > 100:
             raise ValueError("Некорректный размер счёта или риск")
         pattern = re.compile(r"^[A-Z0-9]+/USDT:USDT$")
-        if not self.symbols or any(not pattern.fullmatch(symbol) for symbol in self.symbols):
+        if any(not pattern.fullmatch(symbol) for symbol in self.symbols):
             raise ValueError("SYMBOLS должны быть в формате BTC/USDT:USDT")
 
     @property

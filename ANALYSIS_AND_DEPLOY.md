@@ -2,6 +2,8 @@
 
 Проект воспроизводит наблюдаемую на скриншотах логику поиска шорта после сильного пампа и начавшегося охлаждения цены и объёма. Он не открывает сделки, использует только публичные данные BingX USDT-M perpetual swaps и отправляет информационные сигналы в Telegram.
 
+Список инструментов не ограничен тикерами со скриншотов. При `SYMBOLS=ALL`, `SYMBOLS=*`, пустой или отсутствующей переменной бот через публичный `load_markets()` автоматически обнаруживает и сканирует все активные BingX USDT-M perpetual swaps; API-ключи для этого не нужны.
+
 ## Анализ восьми скриншотов
 
 На изображениях нет биржевых графиков или свечей. Поэтому свечные формации, EMA/MA и их значения извлечь невозможно; фактически видны только карточки AXON DUMP RADAR, диагностические карточки Ticker Analyzer и уведомления о достижении целей.
@@ -95,14 +97,14 @@ tests/test_signals.py
 Unit-тесты используют только синтетические pandas DataFrame. Есть положительный кейс всех условий, отдельные отрицательные проверки pump, quote volume, RSI/super-pump, peak distance, retracement, volume spike, price cooling и volume cooling, а также тесты уровней, position sizing, дедупликации, persistence, консервативного SL и валидации config.
 
 ```text
-.......................                                                  [100%]
-23 passed in 0.44s
+.............................                                            [100%]
+29 passed in 0.37s
 ```
 
 Фактический smoke-запрос из текущей среды:
 
 ```text
-OK: BingX public API, 5 swap markets, MARSCOIN/USDT:USDT, candles=149, quoteVolume=9132306.5
+OK: BingX public API, 853 swap markets, 0G/USDT:USDT, candles=149, quoteVolume=6734002.31
 ```
 
 ## Формат Telegram-сигнала
@@ -139,7 +141,7 @@ Railway поддерживает `railway.json` с `startCommand` и `healthchec
 5. Добавьте Railway Volume с mount path `/data` и задайте `STATE_FILE=/data/signals_state.json`, чтобы дедупликация переживала redeploy.
 6. Сгенерируйте публичный domain для сервиса. Railway будет проверять `/health`, а один процесс одновременно держит aiohttp и Telegram long polling.
 7. Не масштабируйте сервис более чем до одной реплики. Несколько экземпляров Telegram polling будут конкурировать и могут дублировать scanner.
-8. После первого deploy откройте Railway Shell и выполните `SYMBOLS=BTC/USDT:USDT python check_api.py`.
+8. После первого deploy откройте Railway Shell и выполните `python check_api.py`, чтобы проверить полное обнаружение рынков. Для одного быстрого контрольного запроса используйте `SYMBOLS=BTC/USDT:USDT python check_api.py`.
 9. Убедитесь, что вывод начинается с `OK: BingX public API`, затем проверьте `/health` и команды `/start`, `/status`, `/settings`.
 
 ### Переменные окружения
@@ -150,7 +152,7 @@ Railway поддерживает `railway.json` с `startCommand` и `healthchec
 | `TELEGRAM_CHAT_ID` | Да | ID личного чата, группы или канала |
 | `BINGX_API_KEY` | Нет | Оставить пустым |
 | `BINGX_SECRET` | Нет | Оставить пустым |
-| `SYMBOLS` | Да | Пять unified symbols со скриншотов; можно изменить |
+| `SYMBOLS` | Нет | `ALL`, `*` или пусто означает все активные BingX USDT-M perpetual swaps; список задаётся только для добровольного whitelist |
 | `TIMEFRAME` | Нет | `15m` |
 | `SCANNER_INTERVAL` | Нет | `300` секунд |
 | `REQUEST_TIMEOUT_MS` | Нет | `20000` |
@@ -181,7 +183,7 @@ Railway поддерживает `railway.json` с `startCommand` и `healthchec
 
 - [ ] Создать Telegram-бота через BotFather и предоставить `BOT_TOKEN`.
 - [ ] Добавить бота в целевой чат/канал, дать право отправлять сообщения и предоставить `TELEGRAM_CHAT_ID`.
-- [ ] Подтвердить или изменить список MARSCOIN, USELESS, SKR, PONS и FLOCK.
+- [ ] Оставить `SYMBOLS` пустым для полного сканирования или задать добровольный whitelist.
 - [ ] Подтвердить default leverage 3x, account size и риск на сделку.
 - [ ] Решить, нужен ли только сигнал по TP1 или сопровождение TP2/TP3 отдельными Telegram-уведомлениями.
 - [ ] API-ключи BingX не нужны. Не передавайте их, пока бот работает только с публичными данными.

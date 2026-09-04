@@ -62,6 +62,8 @@ async def run() -> None:
     scanner: asyncio.Task | None = None
     try:
         await client.initialize()
+        runtime["market_count"] = len(client.symbols)
+        log.info("Загружено активных BingX USDT swap рынков: %d", len(client.symbols))
         app = web.Application()
         app.router.add_get("/", health)
         app.router.add_get("/health", health)

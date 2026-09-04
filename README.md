@@ -32,7 +32,7 @@ python main.py
 
 Команды Telegram: `/start`, `/status`, `/settings`. Healthcheck: `GET /health`.
 
-`SYMBOLS` принимает unified symbols через запятую. По умолчанию указаны тикеры со скриншотов: `MARSCOIN/USDT:USDT`, `USELESS/USDT:USDT`, `SKR/USDT:USDT`, `PONS/USDT:USDT`, `FLOCK/USDT:USDT`; недоступные на момент запуска рынки пропускаются с предупреждением. Для проверки инфраструктуры можно временно задать `SYMBOLS=BTC/USDT:USDT`. `TIMEFRAME` настраивается без изменения логики; допустимы интервалы не больше 1h, которые делят час без остатка.
+`SYMBOLS=ALL`, `SYMBOLS=*`, пустая переменная или полное отсутствие переменной включают полный рынок. В этом режиме бот через `load_markets()` автоматически обнаруживает и последовательно сканирует все активные BingX USDT-M perpetual swaps без whitelist и без ограничения по числу токенов. Чтобы добровольно ограничить охват, можно передать unified symbols через запятую, например `BTC/USDT:USDT,ETH/USDT:USDT`; регистр автоматически нормализуется, а недоступные рынки пропускаются с предупреждением. `TIMEFRAME` настраивается без изменения логики; допустимы интервалы не больше 1h, которые делят час без остатка.
 
 `ACCOUNT_SIZE=0` скрывает размер позиции. При положительном размере риск в USDT равен `ACCOUNT_SIZE × RISK_PCT / 100`; notional равен риску, делённому на относительное расстояние до SL; количество равно `notional / entry`, требуемая маржа — `notional / LEVERAGE`.
 
@@ -45,7 +45,7 @@ python main.py
 3. В Variables добавьте `BOT_TOKEN`, `TELEGRAM_CHAT_ID` и нужные параметры из `.env.example`.
 4. Добавьте persistent Volume и смонтируйте его, например, в `/data`; установите `STATE_FILE=/data/signals_state.json`.
 5. Railway задаёт `PORT` автоматически. Сервис должен иметь публичный domain, чтобы Railway мог вызвать `GET /health`.
-6. Для smoke-проверки откройте Railway Shell и выполните `SYMBOLS=BTC/USDT:USDT python check_api.py`. Ожидается строка `OK: BingX public API...`.
+6. Для smoke-проверки всего market discovery откройте Railway Shell и выполните `python check_api.py`. Ожидается строка `OK: BingX public API...` с полным числом найденных swap markets. Для одного быстрого контрольного запроса можно выполнить `SYMBOLS=BTC/USDT:USDT python check_api.py`.
 
 Это веб-сервис с фоновым scanner task, а не отдельный worker: один процесс одновременно держит HTTP healthcheck и long polling Telegram. Не масштабируйте сервис больше чем до одной реплики, иначе несколько poller-процессов будут конкурировать.
 
