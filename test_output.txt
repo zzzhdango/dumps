@@ -1,5 +1,5 @@
-.................................                                        [100%]
-33 passed in 0.91s
+...................................                                      [100%]
+35 passed in 1.05s
 
 Smoke test with SYMBOLS=ALL:
 OK: BingX public API, 853 swap markets, 0G/USDT:USDT, candles=149, quoteVolume=6734002.31
@@ -10,3 +10,6 @@ compileall: OK
 Paused market regression:
 OK: NCFXUSD2IDR/USDT:USDT: публичные свечи BingX временно приостановлены
 blacklisted: True
+
+Public catalog refresh:
+OK: before=853, after=853, added=0, removed=0

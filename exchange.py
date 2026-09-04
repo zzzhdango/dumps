@@ -44,18 +44,39 @@ class BingXPublicClient:
                 await asyncio.sleep(delay)
         raise RuntimeError("Недостижимый код")
 
-    async def initialize(self) -> None:
-        markets = await self._retry(self.exchange.load_markets, "load_markets")
+    async def _reload_symbols(self, reload: bool) -> tuple[set[str], set[str]]:
+        async def load() -> Any:
+            return await self.exchange.load_markets(reload)
+
+        markets = await self._retry(load, "reload_markets" if reload else "load_markets")
         available = {s for s, m in markets.items() if m.get("swap") and m.get("active", True) and m.get("quote") == "USDT"}
         if self.cfg.symbols:
             invalid = set(self.cfg.symbols) - available
             if invalid:
                 log.warning("Пропущены недоступные BingX swap symbols: %s", sorted(invalid))
-            self.symbols = [symbol for symbol in self.cfg.symbols if symbol in available]
+            updated = [symbol for symbol in self.cfg.symbols if symbol in available]
         else:
-            self.symbols = sorted(available)
-        if not self.symbols:
+            updated = sorted(available)
+        if not updated:
             raise RuntimeError("На BingX не найдены активные USDT swap рынки")
+        previous = set(self.symbols)
+        current = set(updated)
+        self.symbols = updated
+        self.unavailable_symbols.intersection_update(current)
+        return current - previous, previous - current
+
+    async def initialize(self) -> None:
+        await self._reload_symbols(reload=False)
+
+    async def refresh_markets(self) -> tuple[set[str], set[str]]:
+        """Reload the public BingX catalog and return added/removed symbols."""
+        return await self._reload_symbols(reload=True)
+
+    def reset_paused_for_recheck(self) -> set[str]:
+        """Return the previous paused set and allow every symbol to be retried."""
+        previous = set(self.unavailable_symbols)
+        self.unavailable_symbols.clear()
+        return previous
 
     async def fetch_market(self, symbol: str) -> tuple[pd.DataFrame, float]:
         async def bars() -> Any:

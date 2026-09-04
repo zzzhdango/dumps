@@ -28,13 +28,15 @@ log = logging.getLogger(__name__)
 async def scan_forever(cfg: Config, client: BingXPublicClient, store: SignalStore, bot: Bot, runtime: dict) -> None:
     while True:
         cycle_started = time.monotonic()
+        previously_paused = client.reset_paused_for_recheck()
+        # Каждый новый цикл повторно проверяет paused-рынки. Если свечи снова
+        # доступны, символ не попадёт в новый список unavailable_symbols.
+        runtime["unavailable_count"] = 0
         runtime["scan_progress"] = f"0/{len(client.symbols)}"
         log.info("Запуск цикла сканирования %d рынков", len(client.symbols))
         try:
             for index, symbol in enumerate(client.symbols, start=1):
                 try:
-                    if symbol in client.unavailable_symbols:
-                        continue
                     candles, quote_volume = await client.fetch_market(symbol)
                     await store.update_from_candles(symbol, candles)
                     required_bars = 24 * 60 // cfg.timeframe_minutes + 24
@@ -59,6 +61,22 @@ async def scan_forever(cfg: Config, client: BingXPublicClient, store: SignalStor
                             len(client.symbols),
                             len(client.unavailable_symbols),
                         )
+            recovered = previously_paused - client.unavailable_symbols
+            newly_paused = client.unavailable_symbols - previously_paused
+            if recovered:
+                log.info("Восстановлены после pause: %s", ", ".join(sorted(recovered)))
+            if newly_paused:
+                log.warning("Новые paused-рынки: %s", ", ".join(sorted(newly_paused)))
+            added, removed = await client.refresh_markets()
+            runtime["market_count"] = len(client.symbols)
+            runtime["unavailable_count"] = len(client.unavailable_symbols)
+            if added or removed:
+                log.info(
+                    "Каталог BingX обновлён: добавлено %d, удалено %d, всего %d",
+                    len(added),
+                    len(removed),
+                    len(client.symbols),
+                )
             runtime["last_scan"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
             duration = time.monotonic() - cycle_started
             runtime["last_scan_duration"] = f"{duration:.1f} сек"
