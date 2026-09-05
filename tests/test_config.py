@@ -16,6 +16,8 @@ def test_loads_env_and_unified_symbols():
     assert cfg.scan_concurrency == 5
     assert cfg.active_monitor_interval == 60
     assert cfg.active_monitor_concurrency == 3
+    assert cfg.paused_recheck_interval == 900
+    assert cfg.paused_recheck_batch == 5
 
 
 def test_admin_ids_are_parsed_from_comma_separated_value():
@@ -28,10 +30,14 @@ def test_scanner_scheduling_settings_are_loaded():
         "SCAN_CONCURRENCY": "7",
         "ACTIVE_MONITOR_INTERVAL": "90",
         "ACTIVE_MONITOR_CONCURRENCY": "4",
+        "PAUSED_RECHECK_INTERVAL": "1800",
+        "PAUSED_RECHECK_BATCH": "4",
     })
     assert cfg.scan_concurrency == 7
     assert cfg.active_monitor_interval == 90
     assert cfg.active_monitor_concurrency == 4
+    assert cfg.paused_recheck_interval == 1800
+    assert cfg.paused_recheck_batch == 4
 
 
 @pytest.mark.parametrize("value", ["", "ALL", "all", "*", "SYMBOLS="])
@@ -55,6 +61,8 @@ def test_symbols_are_normalized_to_uppercase():
     {"SCAN_CONCURRENCY": "0"}, {"SCAN_CONCURRENCY": "11"},
     {"ACTIVE_MONITOR_INTERVAL": "29"},
     {"ACTIVE_MONITOR_CONCURRENCY": "0"}, {"ACTIVE_MONITOR_CONCURRENCY": "6"},
+    {"PAUSED_RECHECK_INTERVAL": "899"},
+    {"PAUSED_RECHECK_BATCH": "0"}, {"PAUSED_RECHECK_BATCH": "6"},
 ])
 def test_invalid_config(env):
     with pytest.raises(ValueError):

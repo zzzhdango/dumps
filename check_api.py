@@ -19,7 +19,8 @@ async def check() -> None:
         if len(candles) < required_bars:
             raise RuntimeError(f"Получено только {len(candles)} завершённых свечей")
         print(
-            f"OK: BingX public API, {len(client.symbols)} swap markets, {symbol}, "
+            f"OK: BingX public API, {len(client.symbols)} crypto swap markets, "
+            f"excluded TradFi={client.excluded_tradfi_count}, {symbol}, "
             f"candles={len(candles)}, quoteVolume={volume}, last={current_price:.8g}"
         )
     finally:

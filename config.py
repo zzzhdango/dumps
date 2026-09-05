@@ -54,6 +54,8 @@ class Config:
     scan_concurrency: int = 5
     active_monitor_interval: int = 60
     active_monitor_concurrency: int = 3
+    paused_recheck_interval: int = 900
+    paused_recheck_batch: int = 5
     request_timeout_ms: int = 20_000
     max_retries: int = 4
     retry_base_seconds: float = 1.0
@@ -99,6 +101,8 @@ class Config:
             scan_concurrency=_int(e, "SCAN_CONCURRENCY", 5),
             active_monitor_interval=_int(e, "ACTIVE_MONITOR_INTERVAL", 60),
             active_monitor_concurrency=_int(e, "ACTIVE_MONITOR_CONCURRENCY", 3),
+            paused_recheck_interval=_int(e, "PAUSED_RECHECK_INTERVAL", 900),
+            paused_recheck_batch=_int(e, "PAUSED_RECHECK_BATCH", 5),
             request_timeout_ms=_int(e, "REQUEST_TIMEOUT_MS", 20_000),
             max_retries=_int(e, "MAX_RETRIES", 4),
             retry_base_seconds=_float(e, "RETRY_BASE_SECONDS", 1.0),
@@ -143,6 +147,12 @@ class Config:
             raise ValueError("ACTIVE_MONITOR_INTERVAL должен быть не меньше 30 секунд")
         if not 1 <= self.active_monitor_concurrency <= 5:
             raise ValueError("ACTIVE_MONITOR_CONCURRENCY должен быть от 1 до 5")
+        if self.paused_recheck_interval < 900:
+            raise ValueError(
+                "PAUSED_RECHECK_INTERVAL должен быть не меньше 900 секунд"
+            )
+        if not 1 <= self.paused_recheck_batch <= 5:
+            raise ValueError("PAUSED_RECHECK_BATCH должен быть от 1 до 5")
         if self.ohlcv_limit < 120:
             raise ValueError("OHLCV_LIMIT должен быть не меньше 120")
         match = re.fullmatch(r"([1-9]\d*)([mhd])", self.timeframe)

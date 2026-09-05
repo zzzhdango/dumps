@@ -211,3 +211,38 @@ async def test_pending_only_old_state_blocks_old_candle_after_upgrade(
     await store.acknowledge_event("old:SL")
     new_evaluation = replace(evaluation(), candle_timestamp=4000)
     assert await store.add(new_evaluation, "new-candle")
+
+
+@pytest.mark.asyncio
+async def test_prune_old_tradfi_active_keeps_pending_event_and_persists(
+    tmp_path,
+):
+    path = tmp_path / "state.json"
+    store = SignalStore(str(path))
+    crypto = evaluation()
+    tradfi = replace(
+        evaluation(),
+        symbol="NCSKPBR2USD/USDT:USDT",
+    )
+    assert await store.add(crypto, "crypto-signal")
+    assert await store.add(tradfi, "old-tradfi-signal")
+
+    events = await store.update_from_candles(
+        tradfi.symbol,
+        candle(2000, low=94),
+    )
+    assert [event.kind for event in events] == ["TP1"]
+
+    removed = await store.prune_active_symbols({crypto.symbol})
+    assert removed == {tradfi.symbol}
+    assert store.is_active(crypto.symbol)
+    assert not store.is_active(tradfi.symbol)
+    assert [event.kind for event in store.pending_events] == ["TP1"]
+    assert store.pending_events[0].symbol == tradfi.symbol
+
+    restored = SignalStore(str(path))
+    await restored.load()
+    assert restored.is_active(crypto.symbol)
+    assert not restored.is_active(tradfi.symbol)
+    assert [event.kind for event in restored.pending_events] == ["TP1"]
+    assert restored.pending_events[0].symbol == tradfi.symbol

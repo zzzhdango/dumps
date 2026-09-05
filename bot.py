@@ -78,6 +78,8 @@ def build_dispatcher(
         await message.answer(
             f"Состояние: работает\n"
             f"Рынков BingX в сканере: {runtime.get('market_count', 'инициализация')}\n"
+            f"Исключено TradFi-рынков: "
+            f"{runtime.get('excluded_tradfi_count', 0)}\n"
             f"Временно paused: {runtime.get('unavailable_count', 0)}\n"
             f"Текущий прогресс: {runtime.get('scan_progress', 'ожидание')}\n"
             f"Полный цикл: каждые {cfg.scanner_interval} сек., "

@@ -101,6 +101,19 @@ class SignalStore:
     def is_active(self, symbol: str) -> bool:
         return symbol in self.active
 
+    async def prune_active_symbols(
+        self,
+        available_symbols: set[str],
+    ) -> set[str]:
+        async with self._lock:
+            removed = set(self.active) - available_symbols
+            if not removed:
+                return set()
+            for symbol in removed:
+                del self.active[symbol]
+            await self._save_unlocked()
+            return removed
+
     async def add(
         self,
         evaluation: StrategyEvaluation,

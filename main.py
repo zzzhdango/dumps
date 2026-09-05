@@ -72,11 +72,12 @@ async def scan_forever(
 
     while True:
         cycle_started = time.monotonic()
-        previously_paused = client.reset_paused_for_recheck()
-        # Каждый новый цикл повторно проверяет paused-рынки. Если свечи снова
-        # доступны, символ не попадёт в новый список unavailable_symbols.
-        runtime["unavailable_count"] = 0
-        symbols = list(client.symbols)
+        symbols, previously_paused, retrying_paused = (
+            client.prepare_scan_symbols()
+        )
+        # Paused-рынки проверяются ограниченным пакетом не чаще интервала,
+        # разрешённого BingX. Это обновляет список без глобального 109429.
+        runtime["unavailable_count"] = len(client.unavailable_symbols)
         total = len(symbols)
         runtime["scan_progress"] = f"0/{total}"
         log.info(
@@ -172,14 +173,18 @@ async def scan_forever(
             await asyncio.gather(
                 *(process_symbol(symbol) for symbol in symbols)
             )
-            recovered = previously_paused - client.unavailable_symbols
+            recovered = retrying_paused - client.unavailable_symbols
             newly_paused = client.unavailable_symbols - previously_paused
             if recovered:
                 log.info("Восстановлены после pause: %s", ", ".join(sorted(recovered)))
             if newly_paused:
                 log.warning("Новые paused-рынки: %s", ", ".join(sorted(newly_paused)))
             added, removed = await client.refresh_markets()
+            pruned_signals = await store.prune_active_symbols(
+                client.available_symbols
+            )
             runtime["market_count"] = len(client.symbols)
+            runtime["excluded_tradfi_count"] = client.excluded_tradfi_count
             runtime["unavailable_count"] = len(client.unavailable_symbols)
             if added or removed:
                 log.info(
@@ -187,6 +192,11 @@ async def scan_forever(
                     len(added),
                     len(removed),
                     len(client.symbols),
+                )
+            if pruned_signals:
+                log.warning(
+                    "Удалены активные сигналы вне криптокаталога BingX: %s",
+                    ", ".join(sorted(pruned_signals)),
                 )
             runtime["last_scan"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
             duration = time.monotonic() - cycle_started
@@ -241,6 +251,17 @@ async def monitor_active_signals(
                             pending,
                         )
                         if not store.is_active(symbol):
+                            return
+                        if symbol not in client.available_symbols:
+                            removed = await store.prune_active_symbols(
+                                client.available_symbols
+                            )
+                            if symbol in removed:
+                                log.warning(
+                                    "Активный сигнал %s удалён: рынок отсутствует "
+                                    "в криптокаталоге BingX",
+                                    symbol,
+                                )
                             return
                         candles, _, current_price = await client.fetch_market(
                             symbol
@@ -304,8 +325,17 @@ async def run() -> None:
     symbol_locks: dict[str, asyncio.Lock] = {}
     try:
         await client.initialize()
+        pruned_signals = await store.prune_active_symbols(
+            client.available_symbols
+        )
         runtime["market_count"] = len(client.symbols)
+        runtime["excluded_tradfi_count"] = client.excluded_tradfi_count
         log.info("Загружено активных BingX USDT swap рынков: %d", len(client.symbols))
+        if pruned_signals:
+            log.warning(
+                "При запуске удалены активные сигналы вне криптокаталога: %s",
+                ", ".join(sorted(pruned_signals)),
+            )
         app = web.Application()
         app.router.add_get("/", health)
         app.router.add_get("/health", health)
