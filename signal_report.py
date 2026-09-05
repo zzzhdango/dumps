@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import math
 from zoneinfo import ZoneInfo
 
@@ -59,14 +59,7 @@ def format_signal(
     if lv is None:
         raise ValueError("Нельзя форматировать отрицательную оценку")
     m = ev.metrics
-    now_utc = now or datetime.now(timezone.utc)
-    if now_utc.tzinfo is None:
-        now_utc = now_utc.replace(tzinfo=timezone.utc)
-    now_utc = now_utc.astimezone(timezone.utc)
-    kyiv = now_utc.astimezone(ZoneInfo("Europe/Kyiv"))
-    expires = (now_utc + timedelta(hours=cfg.signal_valid_hours)).astimezone(ZoneInfo("Europe/Kyiv"))
     base = ev.symbol.split("/")[0]
-    resolved_signal_id = signal_id or build_signal_id(ev, now_utc)
     current_price = m.get("current_price", lv.entry)
     deviation = (current_price / lv.entry - 1) * 100
     zone_low = lv.entry * (1 - cfg.entry_zone_pct / 100)
@@ -111,11 +104,9 @@ def format_signal(
 
     lines = [
         f"🚀 Токен {base} ⚡ [FUTURES]",
-        f"🆔 ID: {resolved_signal_id}",
         "",
         "🐌 ДОЛГИЙ ПАМП" if long_pump else "⚡ БЫСТРЫЙ ПАМП",
         "",
-        f"⏰ {kyiv:%H:%M:%S} (Киев)",
         "📍 Направление: SHORT",
         f"💰 Сигнальная цена: {_price(lv.entry)}",
         f"📡 Текущая цена: {_price(current_price)}",
@@ -128,9 +119,6 @@ def format_signal(
     if super_pump:
         lines.append("⚡ СУПЕР-ПАМП!")
     lines += [
-        "",
-        f"⏳ СРОК ГОДНОСТИ: {cfg.signal_valid_hours:.1f}ч (до {expires:%H:%M} Киев)",
-        f"⚠️ После {expires:%H:%M} (Киев) сигнал неактуален!",
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
         "📌 ЗОНА 1 ✅ Предпочтительнее",
@@ -148,7 +136,6 @@ def format_signal(
         "",
         "💡 Оценка текущей структуры:",
         *[f"   • {item}" for item in structure],
-        "   ⚠️ Используется только Зона 1; неподтверждённая Зона 2 отключена.",
     ]
     if lv.position_notional is not None:
         lines += [

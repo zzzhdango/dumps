@@ -44,16 +44,18 @@ def test_signal_matches_confirmed_zone_one_math_and_layout():
     )
 
     assert "🚀 Токен MARSCOIN ⚡ [FUTURES]" in text
-    assert "🆔 ID: 20260904-MARSCOIN-1740" in text
     assert "🐌 ДОЛГИЙ ПАМП" in text
     assert "📉 Отклонение от сигнала: -1.76%" in text
-    assert "⏳ СРОК ГОДНОСТИ: 6.0ч (до 23:40 Киев)" in text
     assert "💰 Набор: 0.176113 - 0.187007" in text
     assert "🎯 ТП1 (40%): 0.171574 (-5.5%)" in text
     assert "🎯 ТП2 (30%): 0.163404 (-10.0%)" in text
     assert "🎯 ТП3 (30%): 0.154326 (-15.0%)" in text
     assert "🛑 СЛ: 0.201967" in text
-    assert "🔥 ЗОНА 2" not in text
+    assert "🆔" not in text
+    assert "Киев" not in text
+    assert "СРОК ГОДНОСТИ" not in text
+    assert "неактуален" not in text
+    assert "ЗОНА 2" not in text.upper()
     assert "Не финансовая рекомендация" not in text
 
 
@@ -84,7 +86,12 @@ def test_explicit_signal_id_and_event_messages_are_linked():
     )
     now = datetime(2026, 9, 5, 9, 0, tzinfo=timezone.utc)
     assert build_signal_id(evaluation, now) == "20260905-BTC-1200"
-    assert "🆔 ID: custom-id" in format_signal(evaluation, cfg, now, "custom-id")
+    assert "🆔 ID: custom-id" not in format_signal(
+        evaluation,
+        cfg,
+        now,
+        "custom-id",
+    )
 
     tp_event = SignalEvent(
         "custom-id:TP1", "TP1", evaluation.symbol, "custom-id",
