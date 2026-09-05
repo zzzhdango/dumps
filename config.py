@@ -32,10 +32,22 @@ def _symbols(env: Mapping[str, str]) -> tuple[str, ...]:
     return tuple(item.strip().upper() for item in raw.split(",") if item.strip())
 
 
+def _admin_ids(env: Mapping[str, str]) -> tuple[int, ...]:
+    raw = env.get("ADMIN_IDS", "401028479").strip()
+    try:
+        values = tuple(int(item.strip()) for item in raw.split(",") if item.strip())
+    except ValueError as exc:
+        raise ValueError("ADMIN_IDS должен содержать Telegram ID через запятую") from exc
+    if not values or any(value <= 0 for value in values):
+        raise ValueError("ADMIN_IDS должен содержать хотя бы один положительный Telegram ID")
+    return values
+
+
 @dataclass(frozen=True, slots=True)
 class Config:
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    admin_ids: tuple[int, ...] = (401028479,)
     bingx_api_key: str = ""
     bingx_secret: str = ""
     scanner_interval: int = 300
@@ -62,7 +74,10 @@ class Config:
     tp1_pct: float = 5.5
     tp2_pct: float = 10.0
     tp3_pct: float = 15.0
-    sl_pct: float = 11.25
+    entry_zone_pct: float = 3.0
+    sl_above_zone_pct: float = 8.0
+    signal_valid_hours: float = 6.0
+    long_pump_hours: float = 6.0
     leverage: int = 3
     account_size: float = 0.0
     risk_pct: float = 1.0
@@ -74,6 +89,7 @@ class Config:
         cfg = cls(
             telegram_bot_token=e.get("BOT_TOKEN", e.get("TELEGRAM_BOT_TOKEN", "")).strip(),
             telegram_chat_id=e.get("TELEGRAM_CHAT_ID", "").strip(),
+            admin_ids=_admin_ids(e),
             bingx_api_key=e.get("BINGX_API_KEY", "").strip(),
             bingx_secret=e.get("BINGX_SECRET", "").strip(),
             scanner_interval=_int(e, "SCANNER_INTERVAL", 300),
@@ -99,7 +115,10 @@ class Config:
             tp1_pct=_float(e, "TP1_PCT", 5.5),
             tp2_pct=_float(e, "TP2_PCT", 10),
             tp3_pct=_float(e, "TP3_PCT", 15),
-            sl_pct=_float(e, "SL_PCT", 11.25),
+            entry_zone_pct=_float(e, "ENTRY_ZONE_PCT", 3),
+            sl_above_zone_pct=_float(e, "SL_ABOVE_ZONE_PCT", 8),
+            signal_valid_hours=_float(e, "SIGNAL_VALID_HOURS", 6),
+            long_pump_hours=_float(e, "LONG_PUMP_HOURS", 6),
             leverage=_int(e, "LEVERAGE", 3),
             account_size=_float(e, "ACCOUNT_SIZE", 0),
             risk_pct=_float(e, "RISK_PCT", 1),
@@ -108,6 +127,8 @@ class Config:
         return cfg
 
     def validate(self) -> None:
+        if not self.admin_ids or any(admin_id <= 0 for admin_id in self.admin_ids):
+            raise ValueError("ADMIN_IDS должен содержать положительные Telegram ID")
         if self.scanner_interval < 10:
             raise ValueError("SCANNER_INTERVAL должен быть не меньше 10 секунд")
         if self.ohlcv_limit < 120:
@@ -130,8 +151,9 @@ class Config:
                     self.super_pump_pct, self.min_quote_volume_24h, self.min_rsi_15m,
                     self.max_peak_distance_pct, self.min_retracement_pct,
                     self.min_volume_ratio, self.max_recent_volume_ratio,
-                    self.tp1_pct, self.tp2_pct, self.tp3_pct, self.sl_pct,
-                    self.risk_pct)
+                    self.tp1_pct, self.tp2_pct, self.tp3_pct,
+                    self.entry_zone_pct, self.sl_above_zone_pct,
+                    self.signal_valid_hours, self.long_pump_hours, self.risk_pct)
         if any(v <= 0 for v in positive):
             raise ValueError("Пороговые значения должны быть положительными")
         if not (self.tp1_pct < self.tp2_pct < self.tp3_pct):

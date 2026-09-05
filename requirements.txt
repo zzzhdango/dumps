@@ -1,6 +1,6 @@
 aiogram==3.22.0
 aiohttp==3.12.15
-ccxt==4.5.4
+ccxt==4.5.77
 pandas==2.3.2
 ta==0.11.0
 python-dotenv==1.1.1

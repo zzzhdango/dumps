@@ -14,11 +14,14 @@ async def check() -> None:
     try:
         await client.initialize()
         symbol = client.symbols[0]
-        candles, volume = await client.fetch_market(symbol)
+        candles, volume, current_price = await client.fetch_market(symbol)
         required_bars = 24 * 60 // cfg.timeframe_minutes + 24
         if len(candles) < required_bars:
             raise RuntimeError(f"Получено только {len(candles)} завершённых свечей")
-        print(f"OK: BingX public API, {len(client.symbols)} swap markets, {symbol}, candles={len(candles)}, quoteVolume={volume}")
+        print(
+            f"OK: BingX public API, {len(client.symbols)} swap markets, {symbol}, "
+            f"candles={len(candles)}, quoteVolume={volume}, last={current_price:.8g}"
+        )
     finally:
         await client.close()
 

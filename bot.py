@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
+from typing import Any
 
-from aiogram import Bot, Dispatcher, F, Router
+from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
+from access import is_authorized
 from analysis_report import format_analysis
 from config import Config
 from exchange import BingXPublicClient, MarketUnavailable
@@ -15,26 +18,22 @@ from strategy import StrategyEvaluation, evaluate_strategy
 log = logging.getLogger(__name__)
 
 
-def format_signal(ev: StrategyEvaluation) -> str:
-    lv = ev.levels
-    if lv is None:
-        raise ValueError("Нельзя форматировать отрицательную оценку")
-    lines = [
-        "СИГНАЛ SHORT",
-        f"Инструмент: {ev.symbol}",
-        f"Вход: {lv.entry:.8g}",
-        f"TP1: {lv.tp1:.8g} ({(lv.tp1/lv.entry-1)*100:.2f}%)",
-        f"TP2: {lv.tp2:.8g} ({(lv.tp2/lv.entry-1)*100:.2f}%)",
-        f"TP3: {lv.tp3:.8g} ({(lv.tp3/lv.entry-1)*100:.2f}%)",
-        f"SL: {lv.sl:.8g} (+{(lv.sl/lv.entry-1)*100:.2f}%)",
-        f"Плечо: {lv.leverage}x",
-    ]
-    if lv.position_notional is not None:
-        lines += [f"Размер позиции: {lv.position_notional:.2f} USDT ({lv.position_quantity:.8g} {ev.symbol.split('/')[0]})",
-                  f"Требуемая маржа: {lv.margin_required:.2f} USDT"]
-    lines += ["Причины:", *[f"• {reason}" for reason in ev.reasons],
-              "Только информационный сигнал, не финансовая рекомендация."]
-    return "\n".join(lines)
+class AccessMiddleware(BaseMiddleware):
+    def __init__(self, admin_ids: tuple[int, ...]) -> None:
+        self.admin_ids = admin_ids
+
+    async def __call__(
+        self,
+        handler: Callable[[Message, dict[str, Any]], Awaitable[Any]],
+        event: Message,
+        data: dict[str, Any],
+    ) -> Any:
+        user_id = event.from_user.id if event.from_user else None
+        if not is_authorized(user_id, self.admin_ids):
+            log.warning("Отклонён доступ к боту для Telegram ID %s", user_id)
+            await event.answer("❌ Извините, этот бот приватный.")
+            return None
+        return await handler(event, data)
 
 
 def build_dispatcher(
@@ -44,6 +43,7 @@ def build_dispatcher(
     client: BingXPublicClient,
 ) -> Dispatcher:
     router = Router()
+    router.message.outer_middleware(AccessMiddleware(cfg.admin_ids))
 
     @router.message(Command("start"))
     async def start(message: Message) -> None:
@@ -108,7 +108,7 @@ def build_dispatcher(
             )
             return
         try:
-            candles, quote_volume = await client.fetch_market(symbol)
+            candles, quote_volume, current_price = await client.fetch_market(symbol)
             required_bars = 24 * 60 // cfg.timeframe_minutes + 24
             if len(candles) < required_bars:
                 await message.answer(
@@ -116,7 +116,7 @@ def build_dispatcher(
                     f"{len(candles)} из {required_bars} закрытых свечей."
                 )
                 return
-            evaluation = evaluate_strategy(symbol, candles, quote_volume, cfg)
+            evaluation = evaluate_strategy(symbol, candles, quote_volume, cfg, current_price)
             await message.answer(format_analysis(evaluation, cfg))
         except MarketUnavailable:
             await message.answer(f"{symbol} сейчас находится в состоянии paused на BingX. Попробуйте позже.")

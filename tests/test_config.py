@@ -12,6 +12,12 @@ def test_loads_env_and_unified_symbols():
     assert cfg.account_size == 1000
     assert cfg.timeframe == "15m"
     assert cfg.timeframe_minutes == 15
+    assert cfg.admin_ids == (401028479,)
+
+
+def test_admin_ids_are_parsed_from_comma_separated_value():
+    cfg = Config.from_env({"ADMIN_IDS": "401028479, 987654321"})
+    assert cfg.admin_ids == (401028479, 987654321)
 
 
 @pytest.mark.parametrize("value", ["", "ALL", "all", "*", "SYMBOLS="])
@@ -30,6 +36,8 @@ def test_symbols_are_normalized_to_uppercase():
     {"RISK_PCT": "101"}, {"ACCOUNT_SIZE": "-1"}, {"TP1_PCT": "12", "TP2_PCT": "10"},
     {"MIN_RETRACEMENT_PCT": "11", "MAX_PEAK_DISTANCE_PCT": "10"}, {"PORT": "70000"},
     {"PUMP_1H_PCT": "abc"}, {"TIMEFRAME": "7m"}, {"SYMBOLS": "BTCUSDT"},
+    {"ENTRY_ZONE_PCT": "0"}, {"SL_ABOVE_ZONE_PCT": "0"}, {"SIGNAL_VALID_HOURS": "0"},
+    {"ADMIN_IDS": ""}, {"ADMIN_IDS": "401028479,nope"}, {"ADMIN_IDS": "-1"},
 ])
 def test_invalid_config(env):
     with pytest.raises(ValueError):

@@ -94,7 +94,7 @@ class BingXPublicClient:
             candidate = f"{value}/USDT:USDT"
         return candidate if candidate in self.available_symbols else None
 
-    async def fetch_market(self, symbol: str) -> tuple[pd.DataFrame, float]:
+    async def fetch_market(self, symbol: str) -> tuple[pd.DataFrame, float, float]:
         async def bars() -> Any:
             return await self.exchange.fetch_ohlcv(symbol, self.cfg.timeframe, limit=self.cfg.ohlcv_limit)
         async def ticker() -> Any:
@@ -116,7 +116,10 @@ class BingXPublicClient:
         quote_volume = tick.get("quoteVolume")
         if quote_volume is None:
             quote_volume = (tick.get("info") or {}).get("quoteVolume", 0)
-        return frame, float(quote_volume or 0)
+        current_price = tick.get("last") or tick.get("close")
+        if current_price is None:
+            current_price = completed[-1][4] if completed else 0
+        return frame, float(quote_volume or 0), float(current_price or 0)
 
     async def close(self) -> None:
         await self.exchange.close()

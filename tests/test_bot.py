@@ -1,3 +1,4 @@
+from access import is_authorized
 from analysis_report import format_analysis
 from config import Config
 from strategy import CriterionResult, SignalLevels, StrategyEvaluation
@@ -35,6 +36,14 @@ def criteria(passed: bool = True) -> dict[str, CriterionResult]:
         "price_not_rising": CriterionResult(True, True, "close≤previous close"),
         "recent_volume_cooling": CriterionResult(True, 0.9, "≤1.3"),
     }
+
+
+def test_whitelist_allows_configured_admin_only():
+    admins = (401028479, 987654321)
+    assert is_authorized(401028479, admins)
+    assert is_authorized(987654321, admins)
+    assert not is_authorized(123456789, admins)
+    assert not is_authorized(None, admins)
 
 
 def test_formats_positive_manual_analysis():

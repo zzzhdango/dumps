@@ -44,7 +44,13 @@ def _pct(current: float, past: float) -> float:
     return (current / past - 1.0) * 100.0 if past > 0 else math.nan
 
 
-def evaluate_strategy(symbol: str, candles: pd.DataFrame, quote_volume_24h: float, cfg: Config) -> StrategyEvaluation:
+def evaluate_strategy(
+    symbol: str,
+    candles: pd.DataFrame,
+    quote_volume_24h: float,
+    cfg: Config,
+    current_price: float | None = None,
+) -> StrategyEvaluation:
     required = {"timestamp", "open", "high", "low", "close", "volume"}
     if not required.issubset(candles.columns):
         raise ValueError(f"Отсутствуют колонки: {sorted(required - set(candles.columns))}")
@@ -123,6 +129,7 @@ def evaluate_strategy(symbol: str, candles: pd.DataFrame, quote_volume_24h: floa
         "rsi_15m": rsi,
         "rsi_1h": rsi_1h,
         "close": close,
+        "current_price": float(current_price or close),
         "peak": peak,
         "peak_distance_pct": peak_distance,
         "retracement_pct": retracement,
@@ -137,11 +144,14 @@ def evaluate_strategy(symbol: str, candles: pd.DataFrame, quote_volume_24h: floa
     reasons: tuple[str, ...] = ()
     if passed:
         risk_money = cfg.account_size * cfg.risk_pct / 100.0
-        notional = risk_money / (cfg.sl_pct / 100.0) if cfg.account_size > 0 else None
-        quantity = notional / close if notional is not None else None
+        zone_low = close * (1 - cfg.entry_zone_pct / 100)
+        sl = close * (1 + cfg.entry_zone_pct / 100) * (1 + cfg.sl_above_zone_pct / 100)
+        worst_case_sl_pct = (sl / zone_low - 1) * 100
+        notional = risk_money / (worst_case_sl_pct / 100.0) if cfg.account_size > 0 else None
+        quantity = notional / zone_low if notional is not None else None
         margin = notional / cfg.leverage if notional is not None else None
         levels = SignalLevels(close, close * (1-cfg.tp1_pct/100), close * (1-cfg.tp2_pct/100),
-                              close * (1-cfg.tp3_pct/100), close * (1+cfg.sl_pct/100), cfg.leverage,
+                              close * (1-cfg.tp3_pct/100), sl, cfg.leverage,
                               notional, quantity, margin)
         pump_windows = [name.replace("change_", "").replace("_pct", "") for name, value in changes.items()
                         if value >= {"change_1h_pct": cfg.pump_1h_pct, "change_4h_pct": cfg.pump_4h_pct,

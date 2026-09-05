@@ -9,13 +9,15 @@ from datetime import datetime, timezone
 
 from aiohttp import web
 from aiogram import Bot
-from aiogram.types import BotCommand
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import BotCommand, ReplyParameters
 from dotenv import load_dotenv
 
-from bot import build_dispatcher, format_signal
+from bot import build_dispatcher
 from config import Config
 from exchange import BingXPublicClient, MarketUnavailable
-from signals import SignalStore
+from signal_report import build_signal_id, format_signal, format_signal_event
+from signals import SignalEvent, SignalStore
 from strategy import evaluate_strategy
 
 logging.basicConfig(
@@ -24,6 +26,26 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 log = logging.getLogger(__name__)
+
+
+async def send_signal_event(bot: Bot, chat_id: str, event: SignalEvent) -> None:
+    text = format_signal_event(event)
+    if event.telegram_message_id is None:
+        await bot.send_message(chat_id, text)
+        return
+    try:
+        await bot.send_message(
+            chat_id,
+            text,
+            reply_parameters=ReplyParameters(message_id=event.telegram_message_id),
+        )
+    except TelegramBadRequest:
+        log.warning(
+            "Не удалось ответить на исходное сообщение %s; событие %s отправляется отдельно",
+            event.telegram_message_id,
+            event.event_id,
+        )
+        await bot.send_message(chat_id, text)
 
 
 async def scan_forever(cfg: Config, client: BingXPublicClient, store: SignalStore, bot: Bot, runtime: dict) -> None:
@@ -38,14 +60,27 @@ async def scan_forever(cfg: Config, client: BingXPublicClient, store: SignalStor
         try:
             for index, symbol in enumerate(client.symbols, start=1):
                 try:
-                    candles, quote_volume = await client.fetch_market(symbol)
-                    await store.update_from_candles(symbol, candles)
+                    candles, quote_volume, current_price = await client.fetch_market(symbol)
+                    events = await store.update_from_candles(symbol, candles, current_price)
+                    for event in events:
+                        await send_signal_event(bot, cfg.telegram_chat_id, event)
+                        await store.acknowledge_event(event.event_id)
+                    if events:
+                        continue
                     required_bars = 24 * 60 // cfg.timeframe_minutes + 24
                     if store.is_active(symbol) or len(candles) < required_bars:
                         continue
-                    evaluation = evaluate_strategy(symbol, candles, quote_volume, cfg)
-                    if evaluation.passed and await store.add(evaluation):
-                        await bot.send_message(cfg.telegram_chat_id, format_signal(evaluation))
+                    evaluation = evaluate_strategy(symbol, candles, quote_volume, cfg, current_price)
+                    if evaluation.passed:
+                        signal_now = datetime.now(timezone.utc)
+                        signal_id = build_signal_id(evaluation, signal_now)
+                        created_at_ms = int(signal_now.timestamp() * 1000)
+                        if await store.add(evaluation, signal_id, created_at_ms):
+                            sent = await bot.send_message(
+                                cfg.telegram_chat_id,
+                                format_signal(evaluation, cfg, signal_now, signal_id),
+                            )
+                            await store.set_message_id(symbol, sent.message_id)
                 except asyncio.CancelledError:
                     raise
                 except MarketUnavailable as exc:
@@ -98,7 +133,7 @@ async def run() -> None:
     cfg = Config.from_env()
     if not cfg.telegram_bot_token or not cfg.telegram_chat_id:
         raise ValueError("BOT_TOKEN и TELEGRAM_CHAT_ID обязательны")
-    store = SignalStore(cfg.state_file)
+    store = SignalStore(cfg.state_file, cfg.signal_valid_hours)
     await store.load()
     client = BingXPublicClient(cfg)
     bot = Bot(cfg.telegram_bot_token)

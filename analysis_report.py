@@ -159,7 +159,7 @@ def format_analysis(ev: StrategyEvaluation, cfg: Config) -> str:
                 f"🟢 TP1: {lv.tp1:.8g} (-{cfg.tp1_pct:g}%)",
                 f"🟢 TP2: {lv.tp2:.8g} (-{cfg.tp2_pct:g}%)",
                 f"🟢 TP3: {lv.tp3:.8g} (-{cfg.tp3_pct:g}%)",
-                f"🛑 SL: {lv.sl:.8g} (+{cfg.sl_pct:g}%)",
+            f"🛑 SL: {lv.sl:.8g} (+{(lv.sl / lv.entry - 1) * 100:.2f}%)",
                 f"⚙️ Плечо: {lv.leverage}x",
             ]
     else:

@@ -34,10 +34,10 @@ def test_positive_strategy_and_levels():
     assert ev.levels.tp1 == pytest.approx(94.5)
     assert ev.levels.tp2 == pytest.approx(90)
     assert ev.levels.tp3 == pytest.approx(85)
-    assert ev.levels.sl == pytest.approx(111.25)
-    assert ev.levels.position_notional == pytest.approx(888.8888889)
-    assert ev.levels.position_quantity == pytest.approx(8.8888889)
-    assert ev.levels.margin_required == pytest.approx(296.2962963)
+    assert ev.levels.sl == pytest.approx(111.24)
+    assert ev.levels.position_notional == pytest.approx(681.1797753)
+    assert ev.levels.position_quantity == pytest.approx(7.0224719)
+    assert ev.levels.margin_required == pytest.approx(227.0599251)
 
 
 @pytest.mark.parametrize(("criterion", "quote_volume", "changes"), [
