@@ -51,6 +51,9 @@ class Config:
     bingx_api_key: str = ""
     bingx_secret: str = ""
     scanner_interval: int = 300
+    scan_concurrency: int = 5
+    active_monitor_interval: int = 60
+    active_monitor_concurrency: int = 3
     request_timeout_ms: int = 20_000
     max_retries: int = 4
     retry_base_seconds: float = 1.0
@@ -93,6 +96,9 @@ class Config:
             bingx_api_key=e.get("BINGX_API_KEY", "").strip(),
             bingx_secret=e.get("BINGX_SECRET", "").strip(),
             scanner_interval=_int(e, "SCANNER_INTERVAL", 300),
+            scan_concurrency=_int(e, "SCAN_CONCURRENCY", 5),
+            active_monitor_interval=_int(e, "ACTIVE_MONITOR_INTERVAL", 60),
+            active_monitor_concurrency=_int(e, "ACTIVE_MONITOR_CONCURRENCY", 3),
             request_timeout_ms=_int(e, "REQUEST_TIMEOUT_MS", 20_000),
             max_retries=_int(e, "MAX_RETRIES", 4),
             retry_base_seconds=_float(e, "RETRY_BASE_SECONDS", 1.0),
@@ -131,6 +137,12 @@ class Config:
             raise ValueError("ADMIN_IDS должен содержать положительные Telegram ID")
         if self.scanner_interval < 10:
             raise ValueError("SCANNER_INTERVAL должен быть не меньше 10 секунд")
+        if not 1 <= self.scan_concurrency <= 10:
+            raise ValueError("SCAN_CONCURRENCY должен быть от 1 до 10")
+        if self.active_monitor_interval < 30:
+            raise ValueError("ACTIVE_MONITOR_INTERVAL должен быть не меньше 30 секунд")
+        if not 1 <= self.active_monitor_concurrency <= 5:
+            raise ValueError("ACTIVE_MONITOR_CONCURRENCY должен быть от 1 до 5")
         if self.ohlcv_limit < 120:
             raise ValueError("OHLCV_LIMIT должен быть не меньше 120")
         match = re.fullmatch(r"([1-9]\d*)([mhd])", self.timeframe)

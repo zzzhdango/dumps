@@ -18,6 +18,7 @@ from config import Config
 from exchange import BingXPublicClient, MarketUnavailable
 from signal_report import build_signal_id, format_signal, format_signal_event
 from signals import SignalEvent, SignalStore
+from scheduling import cycle_delay, tracked_signal_symbols
 from strategy import evaluate_strategy
 
 logging.basicConfig(
@@ -48,39 +49,107 @@ async def send_signal_event(bot: Bot, chat_id: str, event: SignalEvent) -> None:
         await bot.send_message(chat_id, text)
 
 
-async def scan_forever(cfg: Config, client: BingXPublicClient, store: SignalStore, bot: Bot, runtime: dict) -> None:
+async def deliver_signal_events(
+    bot: Bot,
+    cfg: Config,
+    store: SignalStore,
+    events: list[SignalEvent],
+) -> None:
+    for event in events:
+        await send_signal_event(bot, cfg.telegram_chat_id, event)
+        await store.acknowledge_event(event.event_id)
+
+
+async def scan_forever(
+    cfg: Config,
+    client: BingXPublicClient,
+    store: SignalStore,
+    bot: Bot,
+    runtime: dict,
+    symbol_locks: dict[str, asyncio.Lock],
+) -> None:
+    semaphore = asyncio.Semaphore(cfg.scan_concurrency)
+
     while True:
         cycle_started = time.monotonic()
         previously_paused = client.reset_paused_for_recheck()
         # Каждый новый цикл повторно проверяет paused-рынки. Если свечи снова
         # доступны, символ не попадёт в новый список unavailable_symbols.
         runtime["unavailable_count"] = 0
-        runtime["scan_progress"] = f"0/{len(client.symbols)}"
-        log.info("Запуск цикла сканирования %d рынков", len(client.symbols))
+        symbols = list(client.symbols)
+        total = len(symbols)
+        runtime["scan_progress"] = f"0/{total}"
+        log.info(
+            "Запуск цикла сканирования %d рынков с параллельностью %d",
+            total,
+            cfg.scan_concurrency,
+        )
         try:
-            for index, symbol in enumerate(client.symbols, start=1):
+            completed = 0
+            progress_lock = asyncio.Lock()
+
+            async def process_symbol(symbol: str) -> None:
+                nonlocal completed
                 try:
-                    candles, quote_volume, current_price = await client.fetch_market(symbol)
-                    events = await store.update_from_candles(symbol, candles, current_price)
-                    for event in events:
-                        await send_signal_event(bot, cfg.telegram_chat_id, event)
-                        await store.acknowledge_event(event.event_id)
-                    if events:
-                        continue
-                    required_bars = 24 * 60 // cfg.timeframe_minutes + 24
-                    if store.is_active(symbol) or len(candles) < required_bars:
-                        continue
-                    evaluation = evaluate_strategy(symbol, candles, quote_volume, cfg, current_price)
-                    if evaluation.passed:
-                        signal_now = datetime.now(timezone.utc)
-                        signal_id = build_signal_id(evaluation, signal_now)
-                        created_at_ms = int(signal_now.timestamp() * 1000)
-                        if await store.add(evaluation, signal_id, created_at_ms):
-                            sent = await bot.send_message(
-                                cfg.telegram_chat_id,
-                                format_signal(evaluation, cfg, signal_now, signal_id),
+                    async with semaphore:
+                        symbol_lock = symbol_locks.setdefault(
+                            symbol,
+                            asyncio.Lock(),
+                        )
+                        async with symbol_lock:
+                            candles, quote_volume, current_price = (
+                                await client.fetch_market(symbol)
                             )
-                            await store.set_message_id(symbol, sent.message_id)
+                            events = await store.update_from_candles(
+                                symbol,
+                                candles,
+                                current_price,
+                            )
+                            await deliver_signal_events(bot, cfg, store, events)
+                            if events:
+                                return
+                            required_bars = (
+                                24 * 60 // cfg.timeframe_minutes + 24
+                            )
+                            if (
+                                store.is_active(symbol)
+                                or len(candles) < required_bars
+                            ):
+                                return
+                            evaluation = evaluate_strategy(
+                                symbol,
+                                candles,
+                                quote_volume,
+                                cfg,
+                                current_price,
+                            )
+                            if evaluation.passed:
+                                signal_now = datetime.now(timezone.utc)
+                                signal_id = build_signal_id(
+                                    evaluation,
+                                    signal_now,
+                                )
+                                created_at_ms = int(
+                                    signal_now.timestamp() * 1000
+                                )
+                                if await store.add(
+                                    evaluation,
+                                    signal_id,
+                                    created_at_ms,
+                                ):
+                                    sent = await bot.send_message(
+                                        cfg.telegram_chat_id,
+                                        format_signal(
+                                            evaluation,
+                                            cfg,
+                                            signal_now,
+                                            signal_id,
+                                        ),
+                                    )
+                                    await store.set_message_id(
+                                        symbol,
+                                        sent.message_id,
+                                    )
                 except asyncio.CancelledError:
                     raise
                 except MarketUnavailable as exc:
@@ -89,14 +158,20 @@ async def scan_forever(cfg: Config, client: BingXPublicClient, store: SignalStor
                 except Exception:
                     log.exception("Ошибка обработки %s; сканирование продолжено", symbol)
                 finally:
-                    runtime["scan_progress"] = f"{index}/{len(client.symbols)}"
-                    if index % 100 == 0 or index == len(client.symbols):
-                        log.info(
-                            "Прогресс сканирования: %d/%d рынков, paused: %d",
-                            index,
-                            len(client.symbols),
-                            len(client.unavailable_symbols),
-                        )
+                    async with progress_lock:
+                        completed += 1
+                        runtime["scan_progress"] = f"{completed}/{total}"
+                        if completed % 100 == 0 or completed == total:
+                            log.info(
+                                "Прогресс сканирования: %d/%d рынков, paused: %d",
+                                completed,
+                                total,
+                                len(client.unavailable_symbols),
+                            )
+
+            await asyncio.gather(
+                *(process_symbol(symbol) for symbol in symbols)
+            )
             recovered = previously_paused - client.unavailable_symbols
             newly_paused = client.unavailable_symbols - previously_paused
             if recovered:
@@ -121,7 +196,92 @@ async def scan_forever(cfg: Config, client: BingXPublicClient, store: SignalStor
             raise
         except Exception:
             log.exception("Ошибка цикла сканера")
-        await asyncio.sleep(cfg.scanner_interval)
+        duration = time.monotonic() - cycle_started
+        delay = cycle_delay(cfg.scanner_interval, duration, 10.0)
+        runtime["next_scan_in"] = f"{delay:.1f} сек"
+        await asyncio.sleep(delay)
+
+
+async def monitor_active_signals(
+    cfg: Config,
+    client: BingXPublicClient,
+    store: SignalStore,
+    bot: Bot,
+    runtime: dict,
+    symbol_locks: dict[str, asyncio.Lock],
+) -> None:
+    semaphore = asyncio.Semaphore(cfg.active_monitor_concurrency)
+
+    while True:
+        cycle_started = time.monotonic()
+        symbols = tracked_signal_symbols(store.active, store.pending_events)
+        total = len(symbols)
+        completed = 0
+        progress_lock = asyncio.Lock()
+        runtime["monitor_progress"] = f"0/{total}"
+
+        async def process_symbol(symbol: str) -> None:
+            nonlocal completed
+            try:
+                async with semaphore:
+                    symbol_lock = symbol_locks.setdefault(
+                        symbol,
+                        asyncio.Lock(),
+                    )
+                    async with symbol_lock:
+                        pending = [
+                            event
+                            for event in store.pending_events
+                            if event.symbol == symbol
+                        ]
+                        await deliver_signal_events(
+                            bot,
+                            cfg,
+                            store,
+                            pending,
+                        )
+                        if not store.is_active(symbol):
+                            return
+                        candles, _, current_price = await client.fetch_market(
+                            symbol
+                        )
+                        events = await store.update_from_candles(
+                            symbol,
+                            candles,
+                            current_price,
+                        )
+                        await deliver_signal_events(bot, cfg, store, events)
+            except asyncio.CancelledError:
+                raise
+            except MarketUnavailable as exc:
+                log.warning(
+                    "%s; активный сигнал будет проверен повторно",
+                    exc,
+                )
+            except Exception:
+                log.exception(
+                    "Ошибка контроля TP/SL для %s; мониторинг продолжен",
+                    symbol,
+                )
+            finally:
+                async with progress_lock:
+                    completed += 1
+                    runtime["monitor_progress"] = f"{completed}/{total}"
+
+        if symbols:
+            await asyncio.gather(
+                *(process_symbol(symbol) for symbol in symbols)
+            )
+
+        duration = time.monotonic() - cycle_started
+        runtime["last_monitor"] = datetime.now(timezone.utc).isoformat(
+            timespec="seconds"
+        )
+        runtime["last_monitor_duration"] = f"{duration:.1f} сек"
+        runtime["monitor_progress"] = "ожидание"
+        delay = cycle_delay(cfg.active_monitor_interval, duration, 1.0)
+        runtime["next_monitor_in"] = f"{delay:.1f} сек"
+        await asyncio.sleep(delay)
 
 
 async def health(_: web.Request) -> web.Response:
@@ -140,6 +300,8 @@ async def run() -> None:
     runtime: dict = {}
     runner: web.AppRunner | None = None
     scanner: asyncio.Task | None = None
+    monitor: asyncio.Task | None = None
+    symbol_locks: dict[str, asyncio.Lock] = {}
     try:
         await client.initialize()
         runtime["market_count"] = len(client.symbols)
@@ -150,7 +312,26 @@ async def run() -> None:
         runner = web.AppRunner(app)
         await runner.setup()
         await web.TCPSite(runner, cfg.health_host, cfg.health_port).start()
-        scanner = asyncio.create_task(scan_forever(cfg, client, store, bot, runtime))
+        scanner = asyncio.create_task(
+            scan_forever(
+                cfg,
+                client,
+                store,
+                bot,
+                runtime,
+                symbol_locks,
+            )
+        )
+        monitor = asyncio.create_task(
+            monitor_active_signals(
+                cfg,
+                client,
+                store,
+                bot,
+                runtime,
+                symbol_locks,
+            )
+        )
         await bot.set_my_commands([
             BotCommand(command="analyze", description="Анализ выбранной монеты"),
             BotCommand(command="scan", description="Короткая команда анализа"),
@@ -166,6 +347,10 @@ async def run() -> None:
             scanner.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await scanner
+        if monitor:
+            monitor.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await monitor
         if runner:
             await runner.cleanup()
         await client.close()

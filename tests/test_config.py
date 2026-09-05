@@ -13,11 +13,25 @@ def test_loads_env_and_unified_symbols():
     assert cfg.timeframe == "15m"
     assert cfg.timeframe_minutes == 15
     assert cfg.admin_ids == (401028479,)
+    assert cfg.scan_concurrency == 5
+    assert cfg.active_monitor_interval == 60
+    assert cfg.active_monitor_concurrency == 3
 
 
 def test_admin_ids_are_parsed_from_comma_separated_value():
     cfg = Config.from_env({"ADMIN_IDS": "401028479, 987654321"})
     assert cfg.admin_ids == (401028479, 987654321)
+
+
+def test_scanner_scheduling_settings_are_loaded():
+    cfg = Config.from_env({
+        "SCAN_CONCURRENCY": "7",
+        "ACTIVE_MONITOR_INTERVAL": "90",
+        "ACTIVE_MONITOR_CONCURRENCY": "4",
+    })
+    assert cfg.scan_concurrency == 7
+    assert cfg.active_monitor_interval == 90
+    assert cfg.active_monitor_concurrency == 4
 
 
 @pytest.mark.parametrize("value", ["", "ALL", "all", "*", "SYMBOLS="])
@@ -38,6 +52,9 @@ def test_symbols_are_normalized_to_uppercase():
     {"PUMP_1H_PCT": "abc"}, {"TIMEFRAME": "7m"}, {"SYMBOLS": "BTCUSDT"},
     {"ENTRY_ZONE_PCT": "0"}, {"SL_ABOVE_ZONE_PCT": "0"}, {"SIGNAL_VALID_HOURS": "0"},
     {"ADMIN_IDS": ""}, {"ADMIN_IDS": "401028479,nope"}, {"ADMIN_IDS": "-1"},
+    {"SCAN_CONCURRENCY": "0"}, {"SCAN_CONCURRENCY": "11"},
+    {"ACTIVE_MONITOR_INTERVAL": "29"},
+    {"ACTIVE_MONITOR_CONCURRENCY": "0"}, {"ACTIVE_MONITOR_CONCURRENCY": "6"},
 ])
 def test_invalid_config(env):
     with pytest.raises(ValueError):

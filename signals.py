@@ -48,6 +48,7 @@ class SignalStore:
         self._lock = asyncio.Lock()
         self.active: dict[str, ActiveSignal] = {}
         self.pending_events: list[SignalEvent] = []
+        self.last_signal_candles: dict[str, int] = {}
 
     async def load(self) -> None:
         async with self._lock:
@@ -69,9 +70,33 @@ class SignalStore:
                 self.pending_events = [
                     SignalEvent(**item) for item in data.get("pending_events", [])
                 ]
+                self.last_signal_candles = {
+                    symbol: int(timestamp)
+                    for symbol, timestamp in data.get(
+                        "last_signal_candles",
+                        {},
+                    ).items()
+                }
+                for symbol, signal in self.active.items():
+                    previous = self.last_signal_candles.get(symbol, 0)
+                    self.last_signal_candles[symbol] = max(
+                        previous,
+                        signal.candle_timestamp,
+                    )
+                # Старые state-файлы могли содержать только неотправленный
+                # TP3/SL без active и без last_signal_candles. В таком случае
+                # время события служит консервативной границей: сканер
+                # дождётся свечи, начавшейся после закрытия прошлой сделки.
+                for event in self.pending_events:
+                    previous = self.last_signal_candles.get(event.symbol, 0)
+                    self.last_signal_candles[event.symbol] = max(
+                        previous,
+                        event.event_timestamp,
+                    )
             except (OSError, ValueError, TypeError):
                 self.active = {}
                 self.pending_events = []
+                self.last_signal_candles = {}
 
     def is_active(self, symbol: str) -> bool:
         return symbol in self.active
@@ -87,11 +112,19 @@ class SignalStore:
         async with self._lock:
             if evaluation.symbol in self.active:
                 return False
+            if evaluation.candle_timestamp <= self.last_signal_candles.get(
+                evaluation.symbol,
+                -1,
+            ):
+                return False
             lv = evaluation.levels
             now_ms = created_at_ms if created_at_ms is not None else int(time.time() * 1000)
             self.active[evaluation.symbol] = ActiveSignal(evaluation.symbol, evaluation.candle_timestamp,
                 lv.entry, lv.tp1, lv.tp2, lv.tp3, lv.sl, now_ms, now_ms + self.valid_ms,
                 signal_id=signal_id)
+            self.last_signal_candles[evaluation.symbol] = (
+                evaluation.candle_timestamp
+            )
             await self._save_unlocked()
             return True
 
@@ -205,6 +238,7 @@ class SignalStore:
         payload = {
             "active": {k: asdict(v) for k, v in self.active.items()},
             "pending_events": [asdict(event) for event in self.pending_events],
+            "last_signal_candles": self.last_signal_candles,
         }
         temp = self.path.with_suffix(self.path.suffix + ".tmp")
         temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

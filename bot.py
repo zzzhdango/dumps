@@ -80,15 +80,30 @@ def build_dispatcher(
             f"Рынков BingX в сканере: {runtime.get('market_count', 'инициализация')}\n"
             f"Временно paused: {runtime.get('unavailable_count', 0)}\n"
             f"Текущий прогресс: {runtime.get('scan_progress', 'ожидание')}\n"
+            f"Полный цикл: каждые {cfg.scanner_interval} сек., "
+            f"параллельность {cfg.scan_concurrency}\n"
+            f"Контроль TP/SL: каждые {cfg.active_monitor_interval} сек., "
+            f"параллельность {cfg.active_monitor_concurrency}\n"
+            f"Прогресс TP/SL: "
+            f"{runtime.get('monitor_progress', 'ожидание')}\n"
             f"Последний цикл: {runtime.get('last_scan', 'ещё не завершён')}\n"
             f"Длительность цикла: {runtime.get('last_scan_duration', 'ещё не измерена')}\n"
+            f"Последний контроль TP/SL: "
+            f"{runtime.get('last_monitor', 'ещё не завершён')}\n"
             f"Активные сигналы: {active}"
         )
 
     @router.message(Command("settings"))
     async def settings(message: Message) -> None:
         await message.answer(
-            f"Интервал: {cfg.scanner_interval} сек\nТаймфрейм: {cfg.timeframe}\nПамп: 1h {cfg.pump_1h_pct}% / 4h {cfg.pump_4h_pct}% / 24h {cfg.pump_24h_pct}%\n"
+            f"Интервал полного сканера: {cfg.scanner_interval} сек\n"
+            f"Параллельность полного сканера: {cfg.scan_concurrency}\n"
+            f"Контроль TP/SL: каждые {cfg.active_monitor_interval} сек\n"
+            f"Параллельность контроля TP/SL: "
+            f"{cfg.active_monitor_concurrency}\n"
+            f"Таймфрейм: {cfg.timeframe}\n"
+            f"Памп: 1h {cfg.pump_1h_pct}% / 4h {cfg.pump_4h_pct}% / "
+            f"24h {cfg.pump_24h_pct}%\n"
             f"RSI: {cfg.min_rsi_15m}\nМин. оборот: {cfg.min_quote_volume_24h:,.0f} USDT\nПлечо: {cfg.leverage}x\nРиск: {cfg.risk_pct}%"
         )
 
