@@ -5,7 +5,13 @@ from dataclasses import replace
 import pandas as pd
 import pytest
 
-from signals import SignalStore
+from signals import (
+    CURRENT_PROVIDER,
+    LEGACY_PROVIDER,
+    STATE_SCHEMA_VERSION,
+    SignalStore,
+    StateValidationError,
+)
 from strategy import SignalLevels, StrategyEvaluation
 
 
@@ -31,6 +37,10 @@ async def test_dedup_persistence_and_conservative_close(tmp_path):
     store = SignalStore(str(path))
     ev = evaluation()
     assert await store.add(ev, "20260905-X-1200")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == STATE_SCHEMA_VERSION
+    assert payload["provider"] == CURRENT_PROVIDER
+    assert payload["active"][ev.symbol]["provider"] == CURRENT_PROVIDER
     assert not await store.add(ev)
     await store.set_message_id(ev.symbol, 777)
     restored = SignalStore(str(path))
@@ -150,7 +160,7 @@ async def test_expired_signal_releases_deduplication_without_notification(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_old_state_file_is_migrated_with_new_tracking_fields(tmp_path):
+async def test_unversioned_bingx_active_is_quarantined_not_resumed(tmp_path):
     path = tmp_path / "state.json"
     now_ms = int(time.time() * 1000)
     path.write_text(json.dumps({
@@ -170,15 +180,156 @@ async def test_old_state_file_is_migrated_with_new_tracking_fields(tmp_path):
 
     store = SignalStore(str(path))
     await store.load()
-    signal = store.active["X/USDT:USDT"]
-    assert signal.signal_id == ""
-    assert signal.telegram_message_id is None
-    assert not signal.tp1_hit
+    assert store.active == {}
+    assert store.legacy_quarantine["X/USDT:USDT"]["provider"] == LEGACY_PROVIDER
+    assert store.pending_events == []
+    migrated = json.loads(path.read_text(encoding="utf-8"))
+    assert migrated["schema_version"] == STATE_SCHEMA_VERSION
+    assert migrated["provider"] == CURRENT_PROVIDER
+    assert migrated["active"] == {}
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.asyncio
+async def test_unknown_state_schema_cannot_resume_active_signal(tmp_path):
+    path = tmp_path / "state.json"
+    item = {
+        "symbol": "X/USDT:USDT",
+        "candle_timestamp": 1000,
+        "entry": 100,
+        "tp1": 94.5,
+        "tp2": 90,
+        "tp3": 85,
+        "sl": 111.25,
+        "created_at": 1000,
+        "provider": CURRENT_PROVIDER,
+    }
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": STATE_SCHEMA_VERSION + 1,
+                "provider": CURRENT_PROVIDER,
+                "active": {"X/USDT:USDT": item},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    store = SignalStore(str(path))
+    await store.load()
+
+    assert store.active == {}
+    assert (
+        store.legacy_quarantine["X/USDT:USDT"]["reason"]
+        == "unsupported_schema"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("active", {"X/USDT:USDT": {"symbol": "X/USDT:USDT"}}),
+        ("pending_events", [{"event_id": "incomplete"}]),
+        ("active", []),
+        ("pending_events", {}),
+        ("last_signal_candles", []),
+    ],
+)
+async def test_current_v2_malformed_state_fails_startup(tmp_path, field, value):
+    path = tmp_path / "state.json"
+    payload = {
+        "schema_version": STATE_SCHEMA_VERSION,
+        "provider": CURRENT_PROVIDER,
+        "active": {},
+        "pending_events": [],
+        "last_signal_candles": {},
+        "legacy_quarantine": {},
+    }
+    payload[field] = value
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    store = SignalStore(str(path))
+    with pytest.raises(StateValidationError, match="State v2"):
+        await store.load()
+
+    assert store.active == {}
     assert store.pending_events == []
 
 
 @pytest.mark.asyncio
-async def test_pending_only_old_state_blocks_old_candle_after_upgrade(
+async def test_legacy_malformed_entries_are_quarantined_individually(tmp_path):
+    path = tmp_path / "state.json"
+    valid_pending = {
+        "event_id": "old:SL",
+        "kind": "SL",
+        "symbol": "X/USDT:USDT",
+        "signal_id": "old",
+        "entry": 100,
+        "level_price": 110,
+        "event_timestamp": 2000,
+    }
+    path.write_text(
+        json.dumps(
+            {
+                "active": {
+                    "BROKEN/USDT:USDT": {"symbol": "BROKEN/USDT:USDT"},
+                },
+                "pending_events": [valid_pending, {"event_id": "broken"}],
+                "last_signal_candles": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    store = SignalStore(str(path))
+    await store.load()
+
+    assert [event.event_id for event in store.pending_events] == ["old:SL"]
+    assert store.pending_events[0].provider.startswith("bingx")
+    assert "malformed_active:BROKEN/USDT:USDT" in store.legacy_quarantine
+    assert "malformed_pending:1" in store.legacy_quarantine
+    assert "malformed_container:last_signal_candles" in store.legacy_quarantine
+
+
+@pytest.mark.asyncio
+async def test_unsupported_schema_preserves_valid_pending_and_quarantines_bad(
+    tmp_path,
+):
+    path = tmp_path / "state.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 999,
+                "provider": CURRENT_PROVIDER,
+                "active": {},
+                "pending_events": [
+                    {
+                        "event_id": "future:TP1",
+                        "kind": "TP1",
+                        "symbol": "X/USDT:USDT",
+                        "signal_id": "future",
+                        "entry": 100,
+                        "level_price": 95,
+                        "event_timestamp": 3000,
+                    },
+                    {"event_id": "broken"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    store = SignalStore(str(path))
+    await store.load()
+
+    assert [event.event_id for event in store.pending_events] == ["future:TP1"]
+    assert store.pending_events[0].provider.startswith("unsupported:")
+    assert "malformed_pending:1" in store.legacy_quarantine
+
+
+@pytest.mark.asyncio
+async def test_legacy_pending_is_preserved_but_does_not_block_binance_dedup(
     tmp_path,
 ):
     path = tmp_path / "state.json"
@@ -205,44 +356,44 @@ async def test_pending_only_old_state_blocks_old_candle_after_upgrade(
 
     store = SignalStore(str(path))
     await store.load()
-    assert store.last_signal_candles["X/USDT:USDT"] == 3000
-    assert not await store.add(evaluation(), "duplicate-old-candle")
+    assert store.last_signal_candles == {}
+    assert store.pending_events[0].provider == LEGACY_PROVIDER
+    assert await store.add(evaluation(), "new-binance-signal")
 
     await store.acknowledge_event("old:SL")
-    new_evaluation = replace(evaluation(), candle_timestamp=4000)
-    assert await store.add(new_evaluation, "new-candle")
+    assert store.is_active(evaluation().symbol)
 
 
 @pytest.mark.asyncio
-async def test_prune_old_tradfi_active_keeps_pending_event_and_persists(
+async def test_old_bingx_unified_state_is_compatible_and_pruned(
     tmp_path,
 ):
     path = tmp_path / "state.json"
     store = SignalStore(str(path))
     crypto = evaluation()
-    tradfi = replace(
+    removed_market = replace(
         evaluation(),
-        symbol="NCSKPBR2USD/USDT:USDT",
+        symbol="OLD/USDT:USDT",
     )
     assert await store.add(crypto, "crypto-signal")
-    assert await store.add(tradfi, "old-tradfi-signal")
+    assert await store.add(removed_market, "old-market-signal")
 
     events = await store.update_from_candles(
-        tradfi.symbol,
+        removed_market.symbol,
         candle(2000, low=94),
     )
     assert [event.kind for event in events] == ["TP1"]
 
     removed = await store.prune_active_symbols({crypto.symbol})
-    assert removed == {tradfi.symbol}
+    assert removed == {removed_market.symbol}
     assert store.is_active(crypto.symbol)
-    assert not store.is_active(tradfi.symbol)
+    assert not store.is_active(removed_market.symbol)
     assert [event.kind for event in store.pending_events] == ["TP1"]
-    assert store.pending_events[0].symbol == tradfi.symbol
+    assert store.pending_events[0].symbol == removed_market.symbol
 
     restored = SignalStore(str(path))
     await restored.load()
     assert restored.is_active(crypto.symbol)
-    assert not restored.is_active(tradfi.symbol)
+    assert not restored.is_active(removed_market.symbol)
     assert [event.kind for event in restored.pending_events] == ["TP1"]
-    assert restored.pending_events[0].symbol == tradfi.symbol
+    assert restored.pending_events[0].symbol == removed_market.symbol

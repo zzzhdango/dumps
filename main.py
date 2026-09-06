@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import sys
 import time
@@ -15,9 +14,14 @@ from dotenv import load_dotenv
 
 from bot import build_dispatcher
 from config import Config
-from exchange import BingXPublicClient, MarketUnavailable
+from exchange import (
+    BinanceFuturesPublicClient,
+    BinanceRestrictedLocation,
+    MarketUnavailable,
+)
+from runtime_lock import RuntimeSingletonLock
 from signal_report import build_signal_id, format_signal, format_signal_event
-from signals import SignalEvent, SignalStore
+from signals import CURRENT_PROVIDER, SignalEvent, SignalStore
 from scheduling import cycle_delay, tracked_signal_symbols
 from strategy import evaluate_strategy
 
@@ -29,24 +33,34 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-async def send_signal_event(bot: Bot, chat_id: str, event: SignalEvent) -> None:
-    text = format_signal_event(event)
+async def send_signal_event(bot: Bot, chat_id: str, event: SignalEvent) -> int:
+    text = event.text if event.kind == "INITIAL" else format_signal_event(event)
+    if not text:
+        raise ValueError(f"Outbox event {event.event_id} has no message text")
+    if event.provider != CURRENT_PROVIDER:
+        text = (
+            f"⚠️ Архивное уведомление провайдера {event.provider}; "
+            "это не новый сигнал Binance Futures.\n\n"
+            f"{text}"
+        )
     if event.telegram_message_id is None:
-        await bot.send_message(chat_id, text)
-        return
+        sent = await bot.send_message(chat_id, text)
+        return sent.message_id
     try:
-        await bot.send_message(
+        sent = await bot.send_message(
             chat_id,
             text,
             reply_parameters=ReplyParameters(message_id=event.telegram_message_id),
         )
+        return sent.message_id
     except TelegramBadRequest:
         log.warning(
             "Не удалось ответить на исходное сообщение %s; событие %s отправляется отдельно",
             event.telegram_message_id,
             event.event_id,
         )
-        await bot.send_message(chat_id, text)
+        sent = await bot.send_message(chat_id, text)
+        return sent.message_id
 
 
 async def deliver_signal_events(
@@ -56,13 +70,80 @@ async def deliver_signal_events(
     events: list[SignalEvent],
 ) -> None:
     for event in events:
-        await send_signal_event(bot, cfg.telegram_chat_id, event)
-        await store.acknowledge_event(event.event_id)
+        message_id = await send_signal_event(
+            bot,
+            cfg.telegram_chat_id,
+            event,
+        )
+        await store.acknowledge_event(event.event_id, message_id)
+
+
+async def gather_cancel_on_error(*coroutines: object) -> None:
+    tasks = [asyncio.create_task(coro) for coro in coroutines]
+    try:
+        await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+
+def mark_fatal(runtime: dict, exc: BaseException) -> None:
+    runtime["fatal_error"] = str(exc)
+    runtime["ready"] = False
+    fatal_event = runtime.get("fatal_event")
+    if fatal_event is not None:
+        fatal_event.set()
+
+
+def readiness_status(
+    runtime: dict,
+    cfg: Config,
+    now: float | None = None,
+) -> tuple[bool, dict]:
+    current = time.monotonic() if now is None else now
+    details = {
+        "status": "starting",
+        "exchange": "Binance Futures",
+        "market_count": runtime.get("market_count", 0),
+    }
+    if runtime.get("fatal_error"):
+        details.update(status="blocked", error=runtime["fatal_error"])
+        return False, details
+    required = {
+        "catalog": (
+            runtime.get("catalog_success_at"),
+            max(600.0, cfg.scanner_interval * 3.0),
+        ),
+        "scanner": (
+            runtime.get("scanner_success_at"),
+            max(600.0, cfg.scanner_interval * 3.0),
+        ),
+        "monitor": (
+            runtime.get("monitor_success_at"),
+            max(180.0, cfg.active_monitor_interval * 3.0),
+        ),
+    }
+    missing = [name for name, (stamp, _) in required.items() if stamp is None]
+    stale = [
+        name
+        for name, (stamp, limit) in required.items()
+        if stamp is not None and current - stamp > limit
+    ]
+    if runtime.get("market_count", 0) <= 0:
+        missing.append("markets")
+    if missing or stale:
+        details.update(status="not_ready", missing=missing, stale=stale)
+        return False, details
+    details["status"] = "ready"
+    return True, details
 
 
 async def scan_forever(
     cfg: Config,
-    client: BingXPublicClient,
+    client: BinanceFuturesPublicClient,
     store: SignalStore,
     bot: Bot,
     runtime: dict,
@@ -72,12 +153,8 @@ async def scan_forever(
 
     while True:
         cycle_started = time.monotonic()
-        symbols, previously_paused, retrying_paused = (
-            client.prepare_scan_symbols()
-        )
-        # Paused-рынки проверяются ограниченным пакетом не чаще интервала,
-        # разрешённого BingX. Это обновляет список без глобального 109429.
-        runtime["unavailable_count"] = len(client.unavailable_symbols)
+        # Снимок защищает текущий цикл от изменения каталога при refresh.
+        symbols = list(client.symbols)
         total = len(symbols)
         runtime["scan_progress"] = f"0/{total}"
         log.info(
@@ -87,10 +164,11 @@ async def scan_forever(
         )
         try:
             completed = 0
+            successful_market_fetches = 0
             progress_lock = asyncio.Lock()
 
             async def process_symbol(symbol: str) -> None:
-                nonlocal completed
+                nonlocal completed, successful_market_fetches
                 try:
                     async with semaphore:
                         symbol_lock = symbol_locks.setdefault(
@@ -101,6 +179,7 @@ async def scan_forever(
                             candles, quote_volume, current_price = (
                                 await client.fetch_market(symbol)
                             )
+                            successful_market_fetches += 1
                             events = await store.update_from_candles(
                                 symbol,
                                 candles,
@@ -133,29 +212,31 @@ async def scan_forever(
                                 created_at_ms = int(
                                     signal_now.timestamp() * 1000
                                 )
+                                initial_message = format_signal(
+                                    evaluation,
+                                    cfg,
+                                    signal_now,
+                                    signal_id,
+                                )
                                 if await store.add(
                                     evaluation,
                                     signal_id,
                                     created_at_ms,
+                                    initial_message,
                                 ):
-                                    sent = await bot.send_message(
-                                        cfg.telegram_chat_id,
-                                        format_signal(
-                                            evaluation,
-                                            cfg,
-                                            signal_now,
-                                            signal_id,
-                                        ),
-                                    )
-                                    await store.set_message_id(
-                                        symbol,
-                                        sent.message_id,
+                                    await deliver_signal_events(
+                                        bot,
+                                        cfg,
+                                        store,
+                                        store.pending_for(symbol),
                                     )
                 except asyncio.CancelledError:
                     raise
+                except BinanceRestrictedLocation as exc:
+                    mark_fatal(runtime, exc)
+                    raise
                 except MarketUnavailable as exc:
-                    runtime["unavailable_count"] = len(client.unavailable_symbols)
-                    log.warning("%s; рынок исключён из следующих циклов", exc)
+                    log.warning("%s; обработка рынка пропущена", exc)
                 except Exception:
                     log.exception("Ошибка обработки %s; сканирование продолжено", symbol)
                 finally:
@@ -164,45 +245,45 @@ async def scan_forever(
                         runtime["scan_progress"] = f"{completed}/{total}"
                         if completed % 100 == 0 or completed == total:
                             log.info(
-                                "Прогресс сканирования: %d/%d рынков, paused: %d",
+                                "Прогресс сканирования Binance Futures: %d/%d рынков",
                                 completed,
                                 total,
-                                len(client.unavailable_symbols),
                             )
 
-            await asyncio.gather(
+            await gather_cancel_on_error(
                 *(process_symbol(symbol) for symbol in symbols)
             )
-            recovered = retrying_paused - client.unavailable_symbols
-            newly_paused = client.unavailable_symbols - previously_paused
-            if recovered:
-                log.info("Восстановлены после pause: %s", ", ".join(sorted(recovered)))
-            if newly_paused:
-                log.warning("Новые paused-рынки: %s", ", ".join(sorted(newly_paused)))
             added, removed = await client.refresh_markets()
             pruned_signals = await store.prune_active_symbols(
                 client.available_symbols
             )
             runtime["market_count"] = len(client.symbols)
-            runtime["excluded_tradfi_count"] = client.excluded_tradfi_count
-            runtime["unavailable_count"] = len(client.unavailable_symbols)
+            runtime["catalog_success_at"] = time.monotonic()
             if added or removed:
                 log.info(
-                    "Каталог BingX обновлён: добавлено %d, удалено %d, всего %d",
+                    "Каталог Binance Futures обновлён: добавлено %d, удалено %d, всего %d",
                     len(added),
                     len(removed),
                     len(client.symbols),
                 )
             if pruned_signals:
                 log.warning(
-                    "Удалены активные сигналы вне криптокаталога BingX: %s",
+                    "Удалены активные сигналы вне каталога Binance Futures: %s",
                     ", ".join(sorted(pruned_signals)),
                 )
+            if symbols and successful_market_fetches == 0:
+                raise RuntimeError(
+                    "Цикл сканера не получил ни одного рынка"
+                )
             runtime["last_scan"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            runtime["scanner_success_at"] = time.monotonic()
             duration = time.monotonic() - cycle_started
             runtime["last_scan_duration"] = f"{duration:.1f} сек"
             log.info("Цикл сканирования завершён за %.1f сек", duration)
         except asyncio.CancelledError:
+            raise
+        except BinanceRestrictedLocation as exc:
+            mark_fatal(runtime, exc)
             raise
         except Exception:
             log.exception("Ошибка цикла сканера")
@@ -214,7 +295,7 @@ async def scan_forever(
 
 async def monitor_active_signals(
     cfg: Config,
-    client: BingXPublicClient,
+    client: BinanceFuturesPublicClient,
     store: SignalStore,
     bot: Bot,
     runtime: dict,
@@ -227,11 +308,12 @@ async def monitor_active_signals(
         symbols = tracked_signal_symbols(store.active, store.pending_events)
         total = len(symbols)
         completed = 0
+        successful_market_fetches = 0
         progress_lock = asyncio.Lock()
         runtime["monitor_progress"] = f"0/{total}"
 
         async def process_symbol(symbol: str) -> None:
-            nonlocal completed
+            nonlocal completed, successful_market_fetches
             try:
                 async with semaphore:
                     symbol_lock = symbol_locks.setdefault(
@@ -259,13 +341,14 @@ async def monitor_active_signals(
                             if symbol in removed:
                                 log.warning(
                                     "Активный сигнал %s удалён: рынок отсутствует "
-                                    "в криптокаталоге BingX",
+                                    "в каталоге Binance Futures",
                                     symbol,
                                 )
                             return
                         candles, _, current_price = await client.fetch_market(
                             symbol
                         )
+                        successful_market_fetches += 1
                         events = await store.update_from_candles(
                             symbol,
                             candles,
@@ -273,6 +356,9 @@ async def monitor_active_signals(
                         )
                         await deliver_signal_events(bot, cfg, store, events)
             except asyncio.CancelledError:
+                raise
+            except BinanceRestrictedLocation as exc:
+                mark_fatal(runtime, exc)
                 raise
             except MarketUnavailable as exc:
                 log.warning(
@@ -290,59 +376,121 @@ async def monitor_active_signals(
                     runtime["monitor_progress"] = f"{completed}/{total}"
 
         if symbols:
-            await asyncio.gather(
+            await gather_cancel_on_error(
                 *(process_symbol(symbol) for symbol in symbols)
             )
+        if symbols and successful_market_fetches == 0:
+            # Pending-only/removed symbols do not require market data. Any
+            # still-active symbol did, so detect a fully failed monitor cycle.
+            if any(store.is_active(symbol) for symbol in symbols):
+                raise RuntimeError(
+                    "Цикл TP/SL не получил ни одного активного рынка"
+                )
 
         duration = time.monotonic() - cycle_started
         runtime["last_monitor"] = datetime.now(timezone.utc).isoformat(
             timespec="seconds"
         )
         runtime["last_monitor_duration"] = f"{duration:.1f} сек"
+        runtime["monitor_success_at"] = time.monotonic()
         runtime["monitor_progress"] = "ожидание"
         delay = cycle_delay(cfg.active_monitor_interval, duration, 1.0)
         runtime["next_monitor_in"] = f"{delay:.1f} сек"
         await asyncio.sleep(delay)
 
 
-async def health(_: web.Request) -> web.Response:
-    return web.json_response({"status": "ok"})
+async def health(request: web.Request) -> web.Response:
+    runtime = request.app["runtime"]
+    cfg = request.app["config"]
+    ready, payload = readiness_status(runtime, cfg)
+    return web.json_response(payload, status=200 if ready else 503)
+
+
+def validate_runtime_secrets(cfg: Config) -> None:
+    token = cfg.telegram_bot_token.strip()
+    chat_id = cfg.telegram_chat_id.strip()
+    placeholders = ("replace_me", "changeme", "example")
+    if not token or any(value in token.lower() for value in placeholders):
+        raise ValueError("BOT_TOKEN обязателен и не должен быть placeholder")
+    if (
+        not chat_id
+        or any(value in chat_id.lower() for value in placeholders)
+        or chat_id == "-1001234567890"
+    ):
+        raise ValueError(
+            "TELEGRAM_CHAT_ID обязателен и не должен быть placeholder"
+        )
+
+
+async def supervise_tasks(tasks: dict[str, asyncio.Task]) -> None:
+    done, pending = await asyncio.wait(
+        tasks.values(),
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+    completed: list[tuple[str, asyncio.Task]] = [
+        (name, task) for name, task in tasks.items() if task in done
+    ]
+    for _, task in completed:
+        if task.cancelled():
+            raise asyncio.CancelledError
+        error = task.exception()
+        if error is not None:
+            raise error
+    if any(name == "telegram" for name, _ in completed):
+        return
+    name = completed[0][0]
+    raise RuntimeError(f"Критический worker {name} неожиданно завершился")
+
+
+async def watch_fatal(runtime: dict) -> None:
+    await runtime["fatal_event"].wait()
+    raise BinanceRestrictedLocation(runtime["fatal_error"])
 
 
 async def run() -> None:
     load_dotenv()
     cfg = Config.from_env()
-    if not cfg.telegram_bot_token or not cfg.telegram_chat_id:
-        raise ValueError("BOT_TOKEN и TELEGRAM_CHAT_ID обязательны")
-    store = SignalStore(cfg.state_file, cfg.signal_valid_hours)
-    await store.load()
-    client = BingXPublicClient(cfg)
-    bot = Bot(cfg.telegram_bot_token)
-    runtime: dict = {}
+    validate_runtime_secrets(cfg)
+    singleton = RuntimeSingletonLock(cfg.state_file)
+    singleton.acquire()
+    runtime: dict = {"fatal_event": asyncio.Event()}
     runner: web.AppRunner | None = None
-    scanner: asyncio.Task | None = None
-    monitor: asyncio.Task | None = None
+    tasks: dict[str, asyncio.Task] = {}
     symbol_locks: dict[str, asyncio.Lock] = {}
+    client: BinanceFuturesPublicClient | None = None
+    bot: Bot | None = None
     try:
+        store = SignalStore(cfg.state_file, cfg.signal_valid_hours)
+        client = BinanceFuturesPublicClient(cfg)
+        bot = Bot(cfg.telegram_bot_token)
+        await store.load()
         await client.initialize()
         pruned_signals = await store.prune_active_symbols(
             client.available_symbols
         )
         runtime["market_count"] = len(client.symbols)
-        runtime["excluded_tradfi_count"] = client.excluded_tradfi_count
-        log.info("Загружено активных BingX USDT swap рынков: %d", len(client.symbols))
+        runtime["catalog_success_at"] = time.monotonic()
+        log.info(
+            "Загружено активных Binance Futures USDT-M рынков: %d",
+            len(client.symbols),
+        )
         if pruned_signals:
             log.warning(
                 "При запуске удалены активные сигналы вне криптокаталога: %s",
                 ", ".join(sorted(pruned_signals)),
             )
         app = web.Application()
+        app["runtime"] = runtime
+        app["config"] = cfg
         app.router.add_get("/", health)
         app.router.add_get("/health", health)
         runner = web.AppRunner(app)
         await runner.setup()
         await web.TCPSite(runner, cfg.health_host, cfg.health_port).start()
-        scanner = asyncio.create_task(
+        tasks["scanner"] = asyncio.create_task(
             scan_forever(
                 cfg,
                 client,
@@ -352,7 +500,7 @@ async def run() -> None:
                 symbol_locks,
             )
         )
-        monitor = asyncio.create_task(
+        tasks["monitor"] = asyncio.create_task(
             monitor_active_signals(
                 cfg,
                 client,
@@ -362,6 +510,7 @@ async def run() -> None:
                 symbol_locks,
             )
         )
+        tasks["fatal_watcher"] = asyncio.create_task(watch_fatal(runtime))
         await bot.set_my_commands([
             BotCommand(command="analyze", description="Анализ выбранной монеты"),
             BotCommand(command="scan", description="Короткая команда анализа"),
@@ -370,25 +519,36 @@ async def run() -> None:
             BotCommand(command="help", description="Справка"),
             BotCommand(command="start", description="Запуск бота"),
         ])
-        dispatcher = build_dispatcher(cfg, store, runtime, client)
-        await dispatcher.start_polling(bot)
+        dispatcher = build_dispatcher(
+            cfg,
+            store,
+            runtime,
+            client,
+            symbol_locks,
+        )
+        tasks["telegram"] = asyncio.create_task(
+            dispatcher.start_polling(bot)
+        )
+        await supervise_tasks(tasks)
     finally:
-        if scanner:
-            scanner.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await scanner
-        if monitor:
-            monitor.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await monitor
+        for task in tasks.values():
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks.values(), return_exceptions=True)
         if runner:
             await runner.cleanup()
-        await client.close()
-        await bot.session.close()
+        if client is not None:
+            await client.close()
+        if bot is not None:
+            await bot.session.close()
+        singleton.release()
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(run())
+    except BinanceRestrictedLocation as exc:
+        log.critical("%s; процесс остановлен", exc)
+        raise SystemExit(2)
     except KeyboardInterrupt:
         pass

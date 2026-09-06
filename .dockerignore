@@ -1,0 +1,10 @@
+.git
+.env
+.venv
+__pycache__
+*.py[cod]
+.pytest_cache
+data
+backups
+signals_state.json
+test_output.txt

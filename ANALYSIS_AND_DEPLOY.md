@@ -1,237 +1,184 @@
-# Анализ SHORT-сигналов и BingX Telegram-бот
+# Binance Futures Short Bot: архитектура и deployment
 
-Проект воспроизводит наблюдаемую на скриншотах логику поиска шорта после сильного пампа и начавшегося охлаждения цены и объёма. Он не открывает сделки, использует только публичные данные BingX USDT-M perpetual swaps и отправляет информационные сигналы в Telegram.
+## Назначение
 
-Список инструментов не ограничен тикерами со скриншотов. При `SYMBOLS=ALL`, `SYMBOLS=*`, пустой или отсутствующей переменной бот через публичный `load_markets()` автоматически обнаруживает и сканирует все активные криптовалютные BingX USDT-M perpetual swaps со статусом `1`; API-ключи для этого не нужны. Синтетические TradFi perpetuals со статусом `25` не являются монетами и исключаются.
+Сервис читает только публичные Binance USDT-M Futures candles/ticker,
+оценивает SHORT-стратегию и отправляет информационные сообщения в Telegram.
+Торговых операций и приватной аутентификации нет.
 
-## Анализ восьми скриншотов
+## Поток данных
 
-На изображениях нет биржевых графиков или свечей. Поэтому свечные формации, EMA/MA и их значения извлечь невозможно; фактически видны только карточки AXON DUMP RADAR, диагностические карточки Ticker Analyzer и уведомления о достижении целей.
+1. `BinanceFuturesPublicClient.initialize()` загружает активные линейные
+   USDT-settled perpetual swaps.
+2. `scan_forever()` берёт снимок `list(client.symbols)`, загружает завершённые
+   свечи и ticker, обновляет TP/SL, затем оценивает стратегию.
+3. После каждого полного цикла `load_markets(reload=True)` обновляет каталог.
+4. `SignalStore.prune_active_symbols()` удаляет active-сигналы отсутствующих
+   рынков. State schema явно фиксирует provider `binanceusdm`.
+5. `monitor_active_signals()` раз в 60 секунд сначала доставляет persistent
+   pending-события, затем проверяет наличие active-рынка и только после этого
+   обращается к Binance.
 
-| № | Инструмент и тип | Наблюдаемые параметры | Индикаторы и объём | Результат и вывод |
-|---|---|---|---|---|
-| 1 | MARSCOIN FUTURES, рабочий TF 15m с контролем 1h | ID 20260904-MARSCOIN-0508; SHORT; signal 0.128170; current 0.124720; отклонение -2.69%; откат 10.8%; пик 35 минут назад; памп начался 6.8h назад. Zone 1 preferred: 0.124325-0.132015; TP 0.121121/0.115353/0.108944; SL 0.142576. Zone 2: 0.164180-0.174335; TP 0.159948/0.152332/0.143869; SL 0.188282 | 24h volume $5.1M; 24h pump +106.9%; RSI 15m 55.6, 1h 62.4; super-pump; риск 1.5% | Реальный сигнал. Низкий RSI разрешён исключением super-pump, цена уже откатила более 5% |
-| 2 | MARSCOIN FUTURES, рабочий TF 15m с контролем 1h | ID 20260903-MARSCOIN-1705; SHORT; signal 0.115940; current 0.114030; отклонение -1.65%; откат 6.1%; пик 0 минут назад; памп 7.5h. Zone 1: 0.112462-0.119418; TP 0.109563/0.104346/0.098549; SL 0.128972. Zone 2 preferred: 0.152159-0.161571; TP 0.148238/0.141179/0.133336; SL 0.174497 | 24h volume $3.1M; 24h pump +89.3%; RSI 15m 60.9, 1h 69.1; super-pump; риск 0.9% | Реальный сигнал. Снова выполнены ликвидность, сильный памп и откат не менее 5% |
-| 3 | MARSCOIN FUTURES, анализатор | Price 0.17827; 1h -6.5%; 4h +55.6%; 24h +67.0%; памп 4.9h; пик 65 минут; откат и дистанция до пика 9.6% | RSI 15m 64.7, 1h 72.4; volume $8.22M; current 0.15x average; max spike 2h 1.72x; recent 3 vs 3 candles 0.61x | Все проверки зелёные, бот дал бы сигнал. Карточка прямо раскрывает пороги: volume >= $3M, close to peak <=10%, retracement >=5%, 2h spike >=1.3x, цена не растёт, recent volume <=1.3x |
-| 4 | SKR FUTURES, анализатор | Price 0.02384; 1h +4.6%; 4h +20.9%; 24h +16.6%; памп 8.8h; пик 20 минут; откат 3.9%; distance 3.9% | RSI 15m/1h 67.3; volume $3.38M; current 0.26x; max spike 2h 2.37x; recent ratio 1.12x | Сигнала нет. Явно провалены RSI >=75 и retracement >=5%; остальные видимые проверки проходят |
-| 5 | USELESS FUTURES, анализатор | Price 0.18282; 1h +19.1%; 4h +24.5%; 24h +64.0%; памп 9.9h; пик сейчас; откат 5.5%; distance 5.8%; super-pump | RSI 15m 82.6, 1h 80.8; volume $10.03M; current and max spike 3.37x; recent ratio 2.16x | Сигнала нет, несмотря на памп и RSI. Цена ещё растёт, а recent volume 2.16x выше лимита 1.3x, то есть импульс не остыл |
-| 6 | USELESS FUTURES, анализатор; в top также MARSCOIN, PONS и FLOCK | Price 0.25153; 1h -1.4%; 4h +2.0%; 24h +50.4%; памп 3.8h; пик 170 минут; откат 6.4%; distance to 15m max 12.4%; super-pump | RSI 15m 51.3, 1h 62.7; volume $22.39M; current 0.09x; max spike 2h 1.20x | Сигнала нет. Провалены distance <=10% и max 2h volume spike >=1.3x |
-| 7 | MARSCOIN FUTURES, сопровождение ID 20260904-MARSCOIN-0508 | Уведомления о пересечении TP1 при наблюдаемой цене 0.122720 и TP2 при 0.118880. В тексте рекомендуется перенести стоп в безубыток после TP1 | Новых индикаторов нет | Подтверждает дедупликацию и жизненный цикл. После TP сигнал считается отработанным для новых входов |
-| 8 | MARSCOIN FUTURES, рабочий TF 15m с контролем 1h | ID 20260904-MARSCOIN-1740; SHORT; signal 0.181560; current 0.178360; отклонение -1.76%; откат 8.3%; пик 175 минут; памп 6.8h. Zone 1 preferred: 0.176113-0.187007; TP 0.171574/0.163404/0.154326; SL 0.201967. Zone 2: 0.224215-0.238084; TP 0.218436/0.208034/0.196477; SL 0.257131 | Super-pump; риск 1.5%. Нижняя часть с RSI и volume на скриншоте отсутствует | Реальный сигнал. Значения TP снова равны примерно -5.5%, -10% и -15% от центра/сигнальной цены, SL примерно +11.25% |
+State/dedup и общий Telegram outbox записываются атомарно через временный файл
+и `os.replace`. Deploy и runtime используют один строгий validator schema v2:
+точный набор ключей, строгие bool/timestamps и проверка nullable/optional
+полей. Повреждённый текущий schema v2 останавливает startup с явной ошибкой.
+Неверсионированный state считается legacy BingX:
+active-сигналы помещаются в quarantine и не продолжаются по Binance-ценам,
+а уже созданные корректные pending-события сохраняются с исходным provider.
+Повреждённые legacy/unknown записи quarantine-ятся поштучно.
+Доставка outbox имеет at-least-once семантику.
 
-### Общие закономерности
+## Обработка API
 
-- **Предварительный памп:** актив должен пройти хотя бы одно окно роста. По диагностике и списку top приняты пороги 1h >=10%, 4h >=20% или 24h >=30%.
-- **Ликвидность:** суточный quote volume должен быть не меньше $3M.
-- **Перегрев:** обычный режим требует RSI(14) >=75. Для super-pump с ростом не менее 50% RSI разрешено игнорировать.
-- **Начало разворота:** цена находится не дальше 10% от 24h peak, но уже откатила от него минимум на 5%.
-- **Подтверждение объёмом:** за последние 2 часа ранее был spike не меньше 1.3x от rolling average, но последние три свечи уже не показывают роста объёма выше 1.3x.
-- **Остывание цены:** close последней завершённой свечи не выше предыдущего close.
+Клиент создаётся как `ccxt.async_support.binanceusdm` с
+`enableRateLimit=True` и timeout из `REQUEST_TIMEOUT_MS`. Ключи не передаются.
 
-## Формализованные критерии
+Повторяемые ошибки: `NetworkError`, `RequestTimeout`,
+`ExchangeNotAvailable`, `DDoSProtection`, `RateLimitExceeded`. Между попытками
+используется exponential backoff. HTTP 429/418 включает общий monotonic
+cooldown gate для всех конкурентных запросов. Override
+`binanceusdm.handle_errors` прикрепляет status и копию response headers к
+exception конкретного запроса; `Retry-After` не читается из общего
+`last_response_headers`. HTTP 418 без usable header получает консервативную
+паузу.
+HTTP 451/restricted location немедленно преобразуется в
+`BinanceRestrictedLocation`, supervisor отменяет workers и процесс
+завершается ненулевым кодом. Ошибки
+неизвестного/делистнутого symbol преобразуются в `MarketUnavailable`.
 
-### Обязательные условия
+## Подготовка Vultr Ubuntu 24.04
 
-Все восемь проверок должны быть истинны на завершённой свече:
+Подключитесь к серверу отдельным sudo-пользователем. Установите Docker из
+официального Ubuntu-репозитория:
 
-1. \(C_{1h} \ge 10\%\) или \(C_{4h} \ge 20\%\) или \(C_{24h} \ge 30\%\), где \(C_w=(Close_t/Close_{t-w}-1)\times100\).
-2. `quoteVolume24h >= 3_000_000 USDT`.
-3. `RSI(14) >= 75` или `max(C1h, C4h, C24h) >= 50%`.
-4. \(D=(Peak_{24h}-Close_t)/Peak_{24h}\times100 \le 10\%\).
-5. Тот же подтверждённый откат \(D \ge 5\%\).
-6. Максимум `volume / rolling_mean(volume, 20).shift(1)` за последние 2 часа >=1.3.
-7. `Close_t <= Close_t-1`.
-8. `sum(volume last 3) / sum(volume previous 3) <=1.3`.
-
-Порог RSI является альтернативным только внутри третьего условия. Super-pump не отменяет требования ликвидности, отката, близости к peak, предыдущего spike и текущего охлаждения.
-
-### Уровни и размер позиции
-
-- **Entry:** close последней завершённой свечи.
-- **TP1:** `Entry × 0.945`.
-- **TP2:** `Entry × 0.90`.
-- **TP3:** `Entry × 0.85`.
-- **SL:** `Entry × 1.1125`.
-- **Денежный риск:** `ACCOUNT_SIZE × RISK_PCT / 100`.
-- **Notional:** `risk_money / 0.1125`.
-- **Количество базового актива:** `notional / Entry`.
-- **Требуемая маржа:** `notional / LEVERAGE`.
-
-### Явные допущения
-
-- **Таймфрейм:** карточки явно показывают RSI 15m и 1h, но отдельного графика нет. Поэтому основной default равен 15m, а окна 1h/4h/24h вычисляются из него; `TIMEFRAME` можно менять в конфиге.
-- **Плечо:** ни один скриншот не показывает leverage. В проекте задан консервативный default `3x`, полностью изменяемый через `LEVERAGE`.
-- **Entry zones:** на скриншотах есть две зоны, но формула их построения не раскрыта и данных недостаточно для надёжного восстановления. Бот не выдумывает неизвестный алгоритм и использует один воспроизводимый entry по close.
-- **Peak:** применён максимум high завершённых свечей за последние 24h. Точный внутренний способ определения «пика пампа» исходного бота неизвестен.
-- **24h объём:** используется `quoteVolume` из BingX ticker. Если биржа не возвращает его, значение считается нулём и сигнал блокируется.
-- **Закрытие:** TP1 и TP2 фиксируются как промежуточные события. Активный сигнал снимается по TP3, SL или истечению срока. Если одна свеча задевает SL и любой TP, а порядок внутри свечи неизвестен, консервативно считается SL.
-- **Реальное исполнение:** комиссия, funding, проскальзывание и gap не включены. Бот не размещает ордера и не использует приватные методы.
-
-## Проект и полный код
-
-Все исходники без сокращений находятся в этой директории и в приложенном архиве:
-
-```text
-config.py
-access.py
-strategy.py
-exchange.py
-signals.py
-signal_report.py
-bot.py
-main.py
-check_api.py
-requirements.txt
-.env.example
-Dockerfile
-railway.json
-README.md
-tests/__init__.py
-tests/test_config.py
-tests/test_strategy.py
-tests/test_signals.py
+```bash
+sudo apt update
+sudo apt install -y docker.io docker-compose-v2 git
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$USER"
 ```
 
-Код использует `ccxt.async_support.bingx` с `defaultType=swap`, `enableRateLimit=True`, timeout и exponential backoff. Публичная часть CCXT доступна без API-ключей и включает tickers и OHLCV ([официальный репозиторий CCXT](https://github.com/ccxt/ccxt)); unified `fetchOHLCV` возвращает timestamp, OHLC и volume ([CCXT Manual](https://github.com/ccxt/ccxt/wiki/manual)).
+Перезайдите в SSH, чтобы применить членство в группе `docker`. Разрешайте SSH
+в firewall до включения UFW:
 
-## Тесты и фактический результат
-
-Unit-тесты используют только синтетические pandas DataFrame. Есть положительный кейс всех условий, отдельные отрицательные проверки pump, quote volume, RSI/super-pump, peak distance, retracement, volume spike, price cooling и volume cooling, а также тесты уровней, position sizing, дедупликации, persistence, последовательных TP1/TP2/TP3, SL после частичной фиксации, текущей ticker-цены, белого списка, валидации config, распознавания ручного тикера и полного отчёта анализа.
-
-```text
-...............................................................          [100%]
-63 passed in 0.85s
+```bash
+sudo ufw allow OpenSSH
+sudo ufw enable
 ```
 
-Фактический smoke-запрос из текущей среды:
+Health endpoint compose по умолчанию опубликован только на
+`127.0.0.1:8080`, поэтому открывать порт 8080 наружу не нужно.
 
-```text
-OK: BingX public API, 727 crypto swap markets, 0G/USDT:USDT, candles=149, quoteVolume=6708538.04, last=0.1921
+## Первый deployment
+
+```bash
+sudo git clone https://github.com/zzzhdango/dumps.git /opt/dumps
+sudo chown -R "$USER":"$USER" /opt/dumps
+cd /opt/dumps
+cp .env.example .env
+nano .env
+chmod 600 .env
+chmod +x deploy.sh
+./deploy.sh
 ```
 
-## Формат Telegram-сигнала
+Минимально заполните:
 
-```text
-🚀 Токен MARSCOIN ⚡ [FUTURES]
-
-🐌 ДОЛГИЙ ПАМП
-
-📍 Направление: SHORT
-💰 Сигнальная цена: 0.181560
-📡 Текущая цена: 0.178360
-📉 Отклонение от сигнала: -1.76%
-
-✅ Откат 8.3% от пика
-⏰ Пик был 175мин назад
-🕐 Памп начался: 6.8ч назад
-⚡ СУПЕР-ПАМП!
-
-━━━━━━━━━━━━━━━━━━━━━━━━
-📌 ЗОНА 1 ✅ Предпочтительнее
-💰 Набор: 0.176113 - 0.187007
-🎯 ТП1 (40%): 0.171574 (-5.5%)
-🎯 ТП2 (30%): 0.163404 (-10.0%)
-🎯 ТП3 (30%): 0.154326 (-15.0%)
-🛑 СЛ: 0.201967
-━━━━━━━━━━━━━━━━━━━━━━━━
-
-⚡ Риск на сделку: 1.5%
-📊 Объём 24ч: $9.1M
-📈 Памп: 24h: +64.1%
-📈 RSI: 15m: 61.6 | 1h: 72.0
+```dotenv
+BOT_TOKEN=replace_me
+TELEGRAM_CHAT_ID=replace_me
+ADMIN_IDS=401028479
+SYMBOLS=ALL
+SCANNER_INTERVAL=300
+ACTIVE_MONITOR_INTERVAL=60
 ```
 
-Зона 1 равна сигнальной цене ±3%. TP равны −5.5%, −10% и −15% от
-сигнальной цены, распределение фиксации — 40%/30%/30%. SL равен верхней
-границе зоны ×1.08. Зона 2 отключена, потому что её центр нельзя однозначно
-восстановить по скриншотам. Строки размера и маржи появляются только при
-`ACCOUNT_SIZE > 0`; размер рассчитывается консервативно от нижней границы
-Зоны 1 до SL, чтобы заданный риск не был превышен при любом заполнении зоны.
+Никогда не добавляйте `.env`, Telegram token или state в Git. Публичный
+Binance Futures API не требует API key/secret.
 
-## Деплой на Railway
+Проверка:
 
-Railway поддерживает `railway.json` с `startCommand` и `healthcheckPath` ([Railway Config as Code](https://docs.railway.com/config-as-code/reference)). Healthcheck считается успешным при ответе `2xx`, поэтому aiohttp endpoint `/health` возвращает JSON 200 ([Railway Healthchecks](https://docs.railway.com/deployments/healthchecks)).
+```bash
+docker compose ps
+docker compose logs --tail=200 bot
+docker compose exec bot python check_api.py
+curl -fsS http://127.0.0.1:8080/health
+```
 
-1. Создайте пустой GitHub-репозиторий и загрузите в корень всё содержимое директории `bingx_short_bot`.
-2. В Railway выберите New Project, Deploy from GitHub Repo и нужный репозиторий. `Dockerfile` на Python 3.11 и `railway.json` будут обнаружены автоматически.
-3. В Variables добавьте обязательные `BOT_TOKEN`, `TELEGRAM_CHAT_ID` и `ADMIN_IDS=401028479`. Затем скопируйте остальные значения из `.env.example`.
-4. Оставьте `BINGX_API_KEY` и `BINGX_SECRET` пустыми. Они зарезервированы на будущее и не используются публичным scanner.
-5. Добавьте Railway Volume с mount path `/data` и задайте `STATE_FILE=/data/signals_state.json`, чтобы дедупликация переживала redeploy.
-6. Сгенерируйте публичный domain для сервиса. Railway будет проверять `/health`, а один процесс одновременно держит aiohttp и Telegram long polling.
-7. Не масштабируйте сервис более чем до одной реплики. Несколько экземпляров Telegram polling будут конкурировать и могут дублировать scanner.
-8. После первого deploy откройте Railway Shell и выполните `python check_api.py`, чтобы проверить полное обнаружение рынков. Для одного быстрого контрольного запроса используйте `SYMBOLS=BTC/USDT:USDT python check_api.py`.
-9. Убедитесь, что вывод начинается с `OK: BingX public API`, затем проверьте `/health` и команды `/start`, `/status`, `/settings`, `/help`, `/analyze BTC`.
+Если smoke возвращает HTTP 451, проблема относится к географии исходящего IP
+VPS. Клиент завершает запрос сразу; изменение retry не исправит ограничение.
 
-## Ручной анализ монеты
+## State и backups
 
-Команда `/analyze BTC` или её короткий вариант `/scan BTC` анализирует любую
-активную USDT-M пару из полного публичного каталога BingX. Команда не
-обязательна: можно просто отправить в чат `BTC`, `BTCUSDT` или
-`BTC/USDT:USDT`, и бот сразу вернёт анализ.
+Compose использует bind volume:
 
-Бот показывает последнюю закрытую цену, изменения за 1h/4h/24h, RSI, оборот,
-пик и откат за 24 часа, коэффициенты объёма и результат каждого критерия.
-Если все критерии пройдены, отчёт также содержит вход, TP1, TP2, TP3, SL и
-плечо. Если сигнал отсутствует, бот явно перечисляет невыполненные условия.
-Шаблон повторяет структуру Track Analyze со скриншотов: пройденные окна
-пампа, возраст начала пампа и пика, откат, RSI 15m/1h,
-объёмы, блок `Проверки (как у бота)`, итог и причины отказа. Успешные
-критерии обозначены ✅, неуспешные критерии обозначены ❌.
+```text
+./data/signals_state.json -> /app/data/signals_state.json
+```
 
-Возраст начала пампа рассчитывается воспроизводимым способом как время от
-минимального `low` в пределах последних 24 часов до последней закрытой свечи.
-RSI 1h строится из завершённых часовых групп исходных свечей BingX.
+До остановки контейнера `deploy.sh` выполняет schema-aware state validation,
+проверяет конфликт путей, ownership/modes, собирает candidate image и
+проверяет из него запись и атомарный replace в `/app/data` от UID/GID 1000.
+Старый корневой `./signals_state.json` переносится в `./data` только после
+короткой остановки контейнера и backup. Если существуют оба пути, создаются
+conflict backups и deployment прекращается до stop. Владелец state/temp
+нормализуется на UID/GID 1000, файлы получают mode 600. Для
+внешнего backup сохраните обе директории. Не редактируйте state при работающем
+контейнере.
 
-### Переменные окружения
+## Безопасное обновление
 
-| Переменная | Обязательность | Default и назначение |
-|---|---|---|
-| `BOT_TOKEN` | Да | Токен BotFather |
-| `TELEGRAM_CHAT_ID` | Да | ID личного чата, группы или канала |
-| `ADMIN_IDS` | Да | Telegram ID пользователей с доступом к боту через запятую; default `401028479` |
-| `BINGX_API_KEY` | Нет | Оставить пустым |
-| `BINGX_SECRET` | Нет | Оставить пустым |
-| `SYMBOLS` | Нет | `ALL`, `*` или пусто означает все активные криптовалютные BingX USDT-M perpetual swaps со статусом `1`; список задаётся только для добровольного whitelist |
-| `TIMEFRAME` | Нет | `15m` |
-| `SCANNER_INTERVAL` | Нет | `300` секунд между началами полных циклов; если цикл длится дольше, следующий стартует после безопасной паузы |
-| `SCAN_CONCURRENCY` | Нет | `5`, ограничение одновременной обработки рынков полного сканера; допустимо `1–10` |
-| `ACTIVE_MONITOR_INTERVAL` | Нет | `60` секунд, отдельная частота проверки TP/SL активных сигналов |
-| `ACTIVE_MONITOR_CONCURRENCY` | Нет | `3`, параллельность монитора TP/SL; допустимо `1–5` |
-| `PAUSED_RECHECK_INTERVAL` | Нет | `900` секунд; уменьшать нельзя из-за лимита BingX `109429` |
-| `PAUSED_RECHECK_BATCH` | Нет | `5`, максимум известных paused-рынков в общем 15-минутном rolling-бюджете; допустимо `1–5` |
-| `REQUEST_TIMEOUT_MS` | Нет | `20000` |
-| `MAX_RETRIES` | Нет | `4` |
-| `RETRY_BASE_SECONDS` | Нет | `1` |
-| `OHLCV_LIMIT` | Нет | `150` |
-| `STATE_FILE` | Нет | `signals_state.json`; на Railway лучше `/data/signals_state.json` |
-| `PORT` | Автоматически Railway | Локально `8080` |
-| `PUMP_1H_PCT` | Нет | `10` |
-| `PUMP_4H_PCT` | Нет | `20` |
-| `PUMP_24H_PCT` | Нет | `30` |
-| `SUPER_PUMP_PCT` | Нет | `50` |
-| `MIN_QUOTE_VOLUME_24H` | Нет | `3000000` |
-| `MIN_RSI_15M` | Нет | `75` |
-| `MAX_PEAK_DISTANCE_PCT` | Нет | `10` |
-| `MIN_RETRACEMENT_PCT` | Нет | `5` |
-| `MIN_VOLUME_RATIO` | Нет | `1.3` |
-| `MAX_RECENT_VOLUME_RATIO` | Нет | `1.3` |
-| `TP1_PCT` | Нет | `5.5` |
-| `TP2_PCT` | Нет | `10` |
-| `TP3_PCT` | Нет | `15` |
-| `ENTRY_ZONE_PCT` | Нет | `3`, половина ширины Зоны 1 |
-| `SL_ABOVE_ZONE_PCT` | Нет | `8`, стоп выше верхней границы Зоны 1 |
-| `SIGNAL_VALID_HOURS` | Нет | `6`, после этого дедупликация снимается |
-| `LONG_PUMP_HOURS` | Нет | `6`, порог метки «долгий памп» |
-| `LEVERAGE` | Нет | `3` |
-| `ACCOUNT_SIZE` | Нет | `0`, отключает вывод размера |
-| `RISK_PCT` | Нет | `1` |
+```bash
+cd /opt/dumps
+git pull --ff-only
+./deploy.sh
+docker compose logs --tail=200 bot
+```
 
-## Чек-лист пользователя
+Скрипт:
 
-- [ ] Создать Telegram-бота через BotFather и предоставить `BOT_TOKEN`.
-- [ ] Добавить бота в целевой чат/канал, дать право отправлять сообщения и предоставить `TELEGRAM_CHAT_ID`.
-- [ ] Указать `ADMIN_IDS=401028479`; дополнительные разрешённые Telegram ID добавляются через запятую.
-- [ ] Оставить `SYMBOLS` пустым для полного сканирования или задать добровольный whitelist.
-- [ ] Подтвердить default leverage 3x, account size и риск на сделку.
-- [x] Сопровождение TP1, TP2, TP3 и SL включено; уведомления отправляются ответом на исходный сигнал.
-- [ ] API-ключи BingX не нужны. Не передавайте их, пока бот работает только с публичными данными.
+- использует lock против параллельных обновлений;
+- устанавливает `.env` mode 600 и отклоняет placeholder-секреты;
+- до stop проверяет compose, state schema, permissions и UID1000 writeability;
+- до stop собирает candidate image;
+- создаёт backup state;
+- останавливает старый контейнер только перед backup/migration и заменой;
+- запускает `--scale bot=1`;
+- ждёт реального Docker `healthy`;
+- при post-stop ошибке пытается автоматически восстановить предыдущий image,
+  возвращает ненулевой код и выводит диагностику.
+
+Rollback armed непосредственно перед `docker compose stop`. Даже если сама
+команда stop вернула ошибку, trap проверяет `.State.Running`: работающий старый
+контейнер не трогается, а уже остановленный восстанавливается из сохранённого
+image ID.
+
+Compose использует фиксированное имя контейнера, а процесс удерживает
+singleton lock в persistent volume. Не запускайте второй каталог или прямой
+`python main.py` с тем же bot token/state.
+
+## Rollback
+
+```bash
+docker compose down
+git checkout <KNOWN_GOOD_COMMIT>
+cp backups/signals_state.<TIMESTAMP>.json data/signals_state.json
+./deploy.sh
+```
+
+Восстанавливайте backup state только при остановленном контейнере.
+
+## Диагностика
+
+```bash
+docker compose logs -f bot
+docker compose exec bot python check_api.py
+docker compose exec bot python check_exchanges.py
+docker stats --no-stream
+df -h
+```
+
+`check_exchanges.py` проверяет только Binance USDT-M Futures и возвращает
+JSON. Архивный `API_PROVIDER_INVESTIGATION.md` не описывает текущую runtime-
+архитектуру и не должен использоваться как deployment-инструкция.

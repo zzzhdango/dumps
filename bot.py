@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -11,7 +13,11 @@ from aiogram.types import Message
 from access import is_authorized
 from analysis_report import format_analysis
 from config import Config
-from exchange import BingXPublicClient, MarketUnavailable
+from exchange import (
+    BinanceFuturesPublicClient,
+    BinanceRestrictedLocation,
+    MarketUnavailable,
+)
 from signals import SignalStore
 from strategy import StrategyEvaluation, evaluate_strategy
 
@@ -40,15 +46,17 @@ def build_dispatcher(
     cfg: Config,
     store: SignalStore,
     runtime: dict,
-    client: BingXPublicClient,
+    client: BinanceFuturesPublicClient,
+    symbol_locks: dict[str, Any] | None = None,
 ) -> Dispatcher:
+    shared_symbol_locks = symbol_locks if symbol_locks is not None else {}
     router = Router()
     router.message.outer_middleware(AccessMiddleware(cfg.admin_ids))
 
     @router.message(Command("start"))
     async def start(message: Message) -> None:
         await message.answer(
-            "BingX Short Bot запущен.\n\n"
+            "Binance Futures Short Bot запущен.\n\n"
             "Просто отправьте тикер монеты, например: FLOCK\n\n"
             "Команды:\n"
             "/analyze BTC — полный анализ выбранной монеты\n"
@@ -68,8 +76,8 @@ def build_dispatcher(
             "Также доступны команды:\n"
             "/analyze BTC\n"
             "/scan BTC\n\n"
-            "Бот проверит активный USDT-M фьючерс BingX по тем же критериям, "
-            "что используются автоматическим сканером. API-ключ BingX не нужен."
+            "Бот проверит активный Binance USDT-M фьючерс по тем же критериям, "
+            "что используются автоматическим сканером. API-ключ не нужен."
         )
 
     @router.message(Command("status"))
@@ -77,10 +85,8 @@ def build_dispatcher(
         active = ", ".join(sorted(store.active)) or "нет"
         await message.answer(
             f"Состояние: работает\n"
-            f"Рынков BingX в сканере: {runtime.get('market_count', 'инициализация')}\n"
-            f"Исключено TradFi-рынков: "
-            f"{runtime.get('excluded_tradfi_count', 0)}\n"
-            f"Временно paused: {runtime.get('unavailable_count', 0)}\n"
+            f"Рынков Binance Futures в сканере: "
+            f"{runtime.get('market_count', 'инициализация')}\n"
             f"Текущий прогресс: {runtime.get('scan_progress', 'ожидание')}\n"
             f"Полный цикл: каждые {cfg.scanner_interval} сек., "
             f"параллельность {cfg.scan_concurrency}\n"
@@ -115,17 +121,42 @@ def build_dispatcher(
             try:
                 await client.refresh_markets()
                 runtime["market_count"] = len(client.symbols)
+                runtime["catalog_success_at"] = time.monotonic()
                 symbol = client.resolve_symbol(query)
+            except BinanceRestrictedLocation as exc:
+                runtime["fatal_error"] = str(exc)
+                runtime["ready"] = False
+                if runtime.get("fatal_event") is not None:
+                    runtime["fatal_event"].set()
+                await message.answer(
+                    "Binance Futures недоступен из текущей локации (HTTP 451). "
+                    "Сервис будет остановлен."
+                )
+                raise
             except Exception:
-                log.exception("Не удалось обновить каталог BingX для ручного анализа")
+                log.exception(
+                    "Не удалось обновить каталог Binance Futures для ручного анализа"
+                )
+                await message.answer(
+                    "Каталог Binance Futures временно недоступен. "
+                    "Попробуйте позже."
+                )
+                return
         if symbol is None:
             await message.answer(
-                f"Активный USDT-M фьючерс «{query.upper()}» не найден на BingX. "
+                f"Активный USDT-M фьючерс «{query.upper()}» не найден на Binance Futures. "
                 "Проверьте тикер, например: BTC"
             )
             return
         try:
-            candles, quote_volume, current_price = await client.fetch_market(symbol)
+            symbol_lock = shared_symbol_locks.setdefault(
+                symbol,
+                asyncio.Lock(),
+            )
+            async with symbol_lock:
+                candles, quote_volume, current_price = (
+                    await client.fetch_market(symbol)
+                )
             required_bars = 24 * 60 // cfg.timeframe_minutes + 24
             if len(candles) < required_bars:
                 await message.answer(
@@ -135,12 +166,25 @@ def build_dispatcher(
                 return
             evaluation = evaluate_strategy(symbol, candles, quote_volume, cfg, current_price)
             await message.answer(format_analysis(evaluation, cfg))
+        except BinanceRestrictedLocation as exc:
+            runtime["fatal_error"] = str(exc)
+            runtime["ready"] = False
+            if runtime.get("fatal_event") is not None:
+                runtime["fatal_event"].set()
+            await message.answer(
+                "Binance Futures недоступен из текущей локации (HTTP 451). "
+                "Сервис будет остановлен."
+            )
+            raise
         except MarketUnavailable:
-            await message.answer(f"{symbol} сейчас находится в состоянии paused на BingX. Попробуйте позже.")
+            await message.answer(
+                f"{symbol} сейчас недоступен на Binance Futures. Попробуйте позже."
+            )
         except Exception:
             log.exception("Ошибка ручного анализа %s", symbol)
             await message.answer(
-                f"Не удалось проанализировать {symbol} из-за временной ошибки BingX. Попробуйте позже."
+                f"Не удалось проанализировать {symbol} из-за временной ошибки "
+                "Binance Futures. Попробуйте позже."
             )
 
     @router.message(Command("analyze", "scan"))

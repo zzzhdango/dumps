@@ -1,5 +1,8 @@
+import inspect
+
 from access import is_authorized
 from analysis_report import format_analysis
+import bot
 from config import Config
 from strategy import CriterionResult, SignalLevels, StrategyEvaluation
 
@@ -77,3 +80,11 @@ def test_formats_negative_manual_analysis_with_failed_reasons():
     assert "🚫 Итог: ❌ Сигнала бы не было" in text
     assert "• Ни одно окно пампа не достигло заданного порога." in text
     assert "TP1:" not in text
+
+
+def test_runtime_bot_strings_are_binance_futures_only():
+    source = inspect.getsource(bot)
+    assert "Binance Futures" in source
+    assert "BingX" not in source
+    assert "paused" not in source.lower()
+    assert "TradFi" not in source
